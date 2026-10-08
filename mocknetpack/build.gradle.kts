@@ -31,15 +31,16 @@ android {
     }
 }
 
-// MavenPublication：groupId 会被 JitPack 重写为 com.github.cx-z（发布方无需改动）；
-// mavenLocal 发布坐标保留为 com.mocknetpack.android:mocknetpack:1.0.0 供本地验证。
+// MavenPublication：groupId/version 用 project.group/project.version（gradle.properties 默认
+// com.mocknetpack.android:1.0.0；JitPack 构建时 -Pgroup=com.github.cx-z 覆盖 → 接入方坐标
+// com.github.cx-z:MockNetPackAndroid:1.0.0）。artifactId 与仓库名一致（JitPack 单模块格式）。
 afterEvaluate {
     publishing {
         publications {
             create<MavenPublication>("release") {
-                groupId = "com.mocknetpack.android"
-                artifactId = "mocknetpack"
-                version = "1.0.0"
+                groupId = project.group.toString()
+                artifactId = "MockNetPackAndroid"
+                version = project.version.toString()
                 from(components.findByName("release")
                     ?: error("android component missing; available: ${components.names}"))
             }

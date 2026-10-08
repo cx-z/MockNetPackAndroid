@@ -1,2 +1,7 @@
 jdk:
-  - 17
+  - openjdk17
+
+# JitPack 默认在根项目跑 publishToMavenLocal；SDK 发布任务位于子模块，
+# 故显式指定模块任务（JitPack 会自动附加 -Pgroup/-Pversion 覆盖发布坐标）。
+install:
+  - ./gradlew :mocknetpack:publishReleasePublicationToMavenLocal --console=plain
