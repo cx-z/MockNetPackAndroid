@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-10-08T10:57:33.837Z" hostname="zcxdeMacBook-Pro.local" time="0.593">
+  <properties/>
+  <testcase name="bodyParts marks utf8 text without base64" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.091"/>
+  <testcase name="post request body preserved on forward" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.061"/>
+  <testcase name="bodyParts marks binary with placeholder and base64 sample" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.011"/>
+  <testcase name="mock replay filters proto-res headers and defaults content type" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.002"/>
+  <testcase name="captures request response and uploads entry" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.021"/>
+  <testcase name="mock hit serves synthetic response without network and uploads mocked entry" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.016"/>
+  <testcase name="skipHeader requests pass through uncaptured" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.163"/>
+  <testcase name="mock replay applies bodyEncoder when registered" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.003"/>
+  <testcase name="idle session does not capture or upload" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.157"/>
+  <testcase name="large binary response truncated with placeholder and base64" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.066"/>
+  <testcase name="mock bodyBase64 raw bytes replay wins over placeholder text" classname="com.mocknetpack.android.internal.capture.MockNetPackInterceptorTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

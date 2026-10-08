@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<meta http-equiv="x-ua-compatible" content="IE=edge"/>
+<title>Test results - com.mocknetpack.android.internal.connection.ConnectionControllerTest</title>
+<link href="../css/base-style.css" rel="stylesheet" type="text/css"/>
+<link href="../css/style.css" rel="stylesheet" type="text/css"/>
+<script src="../js/report.js" type="text/javascript"></script>
+</head>
+<body>
+<div id="content">
+<div class="breadcrumbs">
+<a class="breadcrumb" href="../index.html">all</a> &gt; 
+<span class="breadcrumb">com.mocknetpack.android.internal.connection.ConnectionControllerTest</span>
+</div>
+<div class="tab-container">
+<ul class="tabLinks">
+<li>
+<a class="successGroup" href="#">Gradle Test Run :mocknetpack:testDebugUnitTest</a>
+</li>
+</ul>
+<div class="tab">
+<h2>Gradle Test Run :mocknetpack:testDebugUnitTest</h2>
+<h1>ConnectionControllerTest</h1>
+<div class="tab-container">
+<ul class="tabLinks">
+<li>
+<a class="" href="#">summary</a>
+</li>
+</ul>
+<div class="tab">
+<h2>summary</h2>
+<div>
+<div class="summary">
+<table>
+<tr>
+<td>
+<div class="summaryGroup">
+<table>
+<tr>
+<td>
+<div class="infoBox">
+<div class="counter">14</div>
+<p>tests</p>
+</div>
+</td>
+<td>
+<div class="infoBox">
+<div class="counter">0</div>
+<p>failures</p>
+</div>
+</td>
+<td>
+<div class="infoBox">
+<div class="counter">0</div>
+<p>skipped</p>
+</div>
+</td>
+<td>
+<div class="infoBox duration">
+<div class="counter">6.237s</div>
+<p>duration</p>
+</div>
+</td>
+</tr>
+</table>
+</div>
+</td>
+<td>
+<div class="infoBox success successRate">
+<div class="percent">100%</div>
+<p>successful</p>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<table class="test-results">
+<thead>
+<tr>
+<th>Child</th>
+<th hidden="">Name</th>
+<th>Tests</th>
+<th>Failures</th>
+<th>Skipped</th>
+<th>Duration</th>
+<th>Success rate</th>
+</tr>
+</thead>
+<tr>
+<td class="success">connection state callbacks fire via main dispatcher</td>
+<td class="path" hidden="">connection state callbacks fire via main dispatcher</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.017s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">heartbeat 404 stops quietly without retrying</td>
+<td class="path" hidden="">heartbeat 404 stops quietly without retrying</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.422s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">heartbeat follows server config interval</td>
+<td class="path" hidden="">heartbeat follows server config interval</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>3.021s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">heartbeat interval allows capturing 3s without clamping to 5</td>
+<td class="path" hidden="">heartbeat interval allows capturing 3s without clamping to 5</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.016s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">heartbeat interval clamps server config to 2 and 300</td>
+<td class="path" hidden="">heartbeat interval clamps server config to 2 and 300</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.029s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">heartbeat with session sets capturing and callback</td>
+<td class="path" hidden="">heartbeat with session sets capturing and callback</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.131s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">network failure backs off and reconnects when server recovers</td>
+<td class="path" hidden="">network failure backs off and reconnects when server recovers</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.185s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">register 403 with pairing token stops and surfaces token invalid</td>
+<td class="path" hidden="">register 403 with pairing token stops and surfaces token invalid</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.423s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">register 403 without pairing token keeps backoff retrying</td>
+<td class="path" hidden="">register 403 without pairing token keeps backoff retrying</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.075s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">register 404 stops quietly without retrying</td>
+<td class="path" hidden="">register 404 stops quietly without retrying</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.427s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">start registers then heartbeats and reaches connected idle</td>
+<td class="path" hidden="">start registers then heartbeats and reaches connected idle</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.017s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">startUnconfigured sets unconfigured without network</td>
+<td class="path" hidden="">startUnconfigured sets unconfigured without network</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.205s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">stop discards in-flight heartbeat result</td>
+<td class="path" hidden="">stop discards in-flight heartbeat result</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.738s</td>
+<td class="success">100%</td>
+</tr>
+<tr>
+<td class="success">stop stops heartbeating and clears state</td>
+<td class="path" hidden="">stop stops heartbeating and clears state</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.529s</td>
+<td class="success">100%</td>
+</tr>
+</table>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div id="footer">
+<p>
+<div>
+<label class="hidden" id="label-for-line-wrapping-toggle" for="line-wrapping-toggle">Wrap lines
+<input id="line-wrapping-toggle" type="checkbox" autocomplete="off"/>
+</label>
+</div>Generated by 
+<a href="https://www.gradle.org">Gradle 9.5.0</a> at 2026年10月8日 18:57:47</p>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.mocknetpack.android.internal.mock.MockRuleControllerTest" tests="9" skipped="0" failures="0" errors="0" timestamp="2026-10-08T10:57:41.282Z" hostname="zcxdeMacBook-Pro.local" time="0.126">
+  <properties/>
+  <testcase name="sync no-op when versions equal" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.112"/>
+  <testcase name="first pull failure keeps empty snapshot - no mock" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.005"/>
+  <testcase name="pull failure after snapshot keeps old rules - mock continues" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.002"/>
+  <testcase name="parseRuleList handles binary bodyBase64" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.001"/>
+  <testcase name="sync pulls with sinceVersion when server version differs" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.004"/>
+  <testcase name="match is method case insensitive with ruleId fill" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.0"/>
+  <testcase name="match respects effective flag from snapshot" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.0"/>
+  <testcase name="reset clears snapshot" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.002"/>
+  <testcase name="parseRuleList decodes contract fields" classname="com.mocknetpack.android.internal.mock.MockRuleControllerTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

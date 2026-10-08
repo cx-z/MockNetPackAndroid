@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.mocknetpack.android.internal.connection.ConnectionControllerTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-10-08T10:57:35.043Z" hostname="zcxdeMacBook-Pro.local" time="6.237">
+  <properties/>
+  <testcase name="heartbeat 404 stops quietly without retrying" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.422"/>
+  <testcase name="connection state callbacks fire via main dispatcher" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.017"/>
+  <testcase name="register 404 stops quietly without retrying" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.427"/>
+  <testcase name="register 403 without pairing token keeps backoff retrying" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.075"/>
+  <testcase name="stop stops heartbeating and clears state" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.529"/>
+  <testcase name="heartbeat with session sets capturing and callback" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.131"/>
+  <testcase name="heartbeat interval clamps server config to 2 and 300" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.029"/>
+  <testcase name="network failure backs off and reconnects when server recovers" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.185"/>
+  <testcase name="startUnconfigured sets unconfigured without network" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.205"/>
+  <testcase name="stop discards in-flight heartbeat result" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.738"/>
+  <testcase name="register 403 with pairing token stops and surfaces token invalid" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.423"/>
+  <testcase name="start registers then heartbeats and reaches connected idle" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.017"/>
+  <testcase name="heartbeat follows server config interval" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="3.021"/>
+  <testcase name="heartbeat interval allows capturing 3s without clamping to 5" classname="com.mocknetpack.android.internal.connection.ConnectionControllerTest" time="0.016"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

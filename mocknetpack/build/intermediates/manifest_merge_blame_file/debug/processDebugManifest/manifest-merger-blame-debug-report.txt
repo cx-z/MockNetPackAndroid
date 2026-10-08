@@ -1,0 +1,42 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.mocknetpack.android" >
+4
+5    <uses-sdk android:minSdkVersion="24" />
+5-->INJECTED
+5-->INJECTED
+6
+7    <!--
+8         SDK 连接层（注册/心跳/流量上传/规则拉取）需要网络；随 AAR 合并进宿主 Debug 包。
+9         拦截、Mock 在应用进程内完成，不申请代理/VPN/证书相关权限。
+10    -->
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:6:5-67
+11-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:6:22-64
+12
+13    <!--
+14         AN-4 扫码连接：相机权限由 SDK 在运行时请求（CameraX + ML Kit barcode）。
+15         权限声明随 AAR 合并进宿主 Debug 包；外网包不引入 SDK ⇒ CAMERA 权限不进发布包（§8.3）。
+16    -->
+17    <uses-permission android:name="android.permission.CAMERA" />
+17-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:10:5-65
+17-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:10:22-62
+18
+19    <application>
+19-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:12:5-19:19
+20
+21        <!--
+22             AN-4 扫码界面（CameraX PreviewView + ML Kit barcode）。由 SDK 内部启动，
+23             宿主无需直接引用；exported=false（不对外部应用开放）。
+24        -->
+25        <activity
+25-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:15:9-18:79
+26            android:name="com.mocknetpack.android.internal.scan.QRScannerActivity"
+26-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:16:13-83
+27            android:exported="false"
+27-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:17:13-37
+28            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+28-->/Users/zcx/Work/MockNetPackage/Android/MockNetPackAndroid/mocknetpack/src/main/AndroidManifest.xml:18:13-76
+29    </application>
+30
+31</manifest>

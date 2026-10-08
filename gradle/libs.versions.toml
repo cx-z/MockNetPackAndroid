@@ -1,0 +1,27 @@
+[versions]
+agp = "9.3.0"
+okhttp = "4.12.0"
+coroutines = "1.8.1"
+junit = "4.13.2"
+mockwebserver = "4.12.0"
+orgjson = "20240303"
+camerax = "1.3.4"
+mlkit-barcode = "17.2.0"
+activity = "1.9.2"
+
+[libraries]
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "mockwebserver" }
+orgjson = { group = "org.json", name = "json", version.ref = "orgjson" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "camerax" }
+camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "camerax" }
+camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
+mlkit-barcode = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkit-barcode" }
+activity = { group = "androidx.activity", name = "activity", version.ref = "activity" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.mocknetpack.android.SkeletonUnitTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-10-08T10:57:33.809Z" hostname="zcxdeMacBook-Pro.local" time="0.023">
+  <properties/>
+  <testcase name="parse invalid payload" classname="com.mocknetpack.android.SkeletonUnitTest" time="0.01"/>
+  <testcase name="parse valid payload" classname="com.mocknetpack.android.SkeletonUnitTest" time="0.001"/>
+  <testcase name="parse appID mismatch" classname="com.mocknetpack.android.SkeletonUnitTest" time="0.0"/>
+  <testcase name="gzip roundtrip" classname="com.mocknetpack.android.SkeletonUnitTest" time="0.006"/>
+  <testcase name="gzip empty returns null" classname="com.mocknetpack.android.SkeletonUnitTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
