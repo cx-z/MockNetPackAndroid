@@ -201,7 +201,8 @@ class QRScannerActivity : ComponentActivity() {
                 onStop = { MockNetPack.stop() },
                 onSave = { server, app -> ServerAddressStore.save(server, app) },
                 onStart = { server, app, d ->
-                    MockNetPack.start(server = server, appId = app, did = d)
+                    // 扫码成功：地址已持久化（onSave），内部带地址启动（调用方不可注入 server）。
+                    MockNetPack.startWithServer(server = server, appId = app, did = d)
                 },
                 onResult = { error -> finishWith(error) },
             )

@@ -1,7 +1,7 @@
 plugins {
     alias(libs.plugins.android.library)
-    // AN-5 接入方式：SDK 发布到本地 Maven（mavenLocal），宿主 Debug 变体
-    // debugImplementation("com.mocknetpack.android:mocknetpack:0.1.0-SNAPSHOT")，
+    // 发布方式：SDK 发布到 GitHub（cx-z/MockNetPackAndroid），接入方经
+    // JitPack 按版本号集成：debugImplementation("com.github.cx-z:MockNetPackAndroid:1.0.0")。
     // POM 携带完整传递依赖（okhttp api / CameraX / ML Kit / activity / coroutines）。
     id("maven-publish")
 }
@@ -31,14 +31,15 @@ android {
     }
 }
 
-// mavenLocal 发布坐标：com.mocknetpack.android:mocknetpack:0.1.0-SNAPSHOT
+// MavenPublication：groupId 会被 JitPack 重写为 com.github.cx-z（发布方无需改动）；
+// mavenLocal 发布坐标保留为 com.mocknetpack.android:mocknetpack:1.0.0 供本地验证。
 afterEvaluate {
     publishing {
         publications {
             create<MavenPublication>("release") {
                 groupId = "com.mocknetpack.android"
                 artifactId = "mocknetpack"
-                version = "0.1.0-SNAPSHOT"
+                version = "1.0.0"
                 from(components.findByName("release")
                     ?: error("android component missing; available: ${components.names}"))
             }

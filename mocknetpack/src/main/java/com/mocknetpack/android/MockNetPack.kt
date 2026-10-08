@@ -22,8 +22,8 @@ import com.mocknetpack.android.internal.store.ServerAddressStore
  */
 object MockNetPack {
 
-    /// SDK 版本号（骨架阶段 0.1.0-SNAPSHOT；发布时与契约版本对齐）。
-    const val VERSION = "0.1.0-SNAPSHOT"
+    /// SDK 版本号（发布版本；接入方通过 GitHub/JitPack 按版本号集成）。
+    const val VERSION = "1.0.0"
 
     /// SDK 自身请求的跳过标记 header（对齐 iOS X-MockNetPack-Skip）。
     const val SKIP_HEADER = "X-MockNetPack-Skip"
@@ -83,16 +83,45 @@ object MockNetPack {
     fun interceptor(): okhttp3.Interceptor = MockNetPackInterceptor()
 
     /**
-     * 启动连接层：生成/读取 did → 注册设备 → 周期心跳 → 会话状态推导。
+     * 无参启动：读取扫码连接持久化的服务器地址直连（DIDStore 设备标识复用）。
      * 幂等：已在运行则忽略。
+     *
+     * **调用方不应当在代码中写死服务器地址**——服务器地址的唯一来源是扫码连接
+     * （`connectByScan` 成功后 SDK 持久化地址，重启免扫码 A2）；未配置时进入
+     * UNCONFIGURED 状态（不发起网络，等待扫码）。
+     *
+     * @param did 业务方提供的设备 ID（可选；传入后 SDK 不再自行生成 did）。
+     */
+    fun start(did: String? = null) {
+        val app = context().packageName
+        val saved = ServerAddressStore.load(app)
+        if (saved != null) {
+            startWithServer(server = saved, did = did)
+        } else {
+            ConnectionController.INSTANCE.startUnconfigured(
+                appID = app,
+                externalDID = did,
+                appVersion = hostVersionName() ?: "",
+                appName = hostAppName(),
+                sdkVersion = VERSION,
+                osVersion = android.os.Build.VERSION.RELEASE ?: "",
+                logHandler = null,
+            )
+        }
+    }
+
+    /**
+     * 带服务器地址启动（**internal**）：仅扫码流程（QRScannerActivity →
+     * ConnectByScanFlow）在注册成功并持久化地址后使用。
+     * 调用方业务代码不可直接注入服务器地址——请使用无参 `start(did)`。
      *
      * @param server 服务器 base URL（形如 `http://host:4290/api/v1`）。
      * @param appId App 标识，默认取 applicationId；did 持久化的作用域。
-     * @param did 业务方提供的设备 ID（传入后 SDK 不再自行生成 did）。
+     * @param did 设备 ID（扫码流程传入 DIDStore 已生成的 did）。
      * @param appVersion App 版本，默认取 versionName。
      * @param logHandler 日志回调（可选；默认 android.util.Log）。
      */
-    fun start(
+    internal fun startWithServer(
         server: String,
         appId: String? = null,
         did: String? = null,
@@ -111,28 +140,6 @@ object MockNetPack {
             osVersion = android.os.Build.VERSION.RELEASE ?: "",
             logHandler = logHandler,
         )
-    }
-
-    /**
-     * 无参启动（扫码连接）：读取持久化服务器地址直连；未配置 → UNCONFIGURED
-     * （不发起网络，等待扫码）。已注册设备重启免扫码（A2）。
-     */
-    fun start(did: String? = null) {
-        val app = context().packageName
-        val saved = ServerAddressStore.load(app)
-        if (saved != null) {
-            start(server = saved, did = did)
-        } else {
-            ConnectionController.INSTANCE.startUnconfigured(
-                appID = app,
-                externalDID = did,
-                appVersion = hostVersionName() ?: "",
-                appName = hostAppName(),
-                sdkVersion = VERSION,
-                osVersion = android.os.Build.VERSION.RELEASE ?: "",
-                logHandler = null,
-            )
-        }
     }
 
     /// 停止连接层：停心跳、清状态（did 保留，下次 start 复用）。

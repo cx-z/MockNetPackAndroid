@@ -1,76 +1,123 @@
 # MockNetPackAndroid
 
-MockNetPack 的 **Android Debug SDK**：应用内 HTTP 抓包上传与远程 Mock 客户端（iOS 端为 `iOS/MockNetPackKit`）。
+MockNetPack's **Android Debug SDK** — an in-app HTTP capture/upload and remote mock client (the iOS counterpart is `iOS/MockNetPackKit` in the server repo).
 
-> 当前为 **AN-0 骨架阶段**（0.1.0-SNAPSHOT）：仓库结构、构建配置、契约模型与模块骨架已就绪；
-> 连接层（AN-1）、采集层（AN-2）、Mock 层（AN-3）、扫码连接（AN-4）按里程碑实现。
-> 技术方案见 [`tasks/安卓SDK技术方案.md`](../../tasks/安卓SDK技术方案.md)。
+> Current version **1.0.0**. Contains the connection layer (registration/heartbeat/session state), the OkHttp capture interceptor, the remote mock client, and the QR scan connection flow.
 
-## 产品定位
+## What it does
 
-与 iOS SDK 完全对齐（除必要平台差异）：
+Fully aligned with the iOS SDK except for necessary platform differences:
 
-- **流量采集**：应用内 HTTP 流量捕获并批量上传至中心 Mock 服务器（无系统代理、无证书）。
-- **远程 Mock 客户端**：拉取设备级生效规则，按 `Method + URL 路径` 本地匹配并回放 canned response。
-- **Fail-open**：服务器不可达/规则同步失败时，业务请求不受影响。
-- **内网包专用（SDK–接入方解耦）**：SDK 对自身是否被集成完全无感（无运行期开关、不探测宿主）；「只在 BaseDemo 内网包集成」是接入方构建期决策——外网包不含本 SDK（依赖门控 + CI dex 校验，见技术方案 §8.3）。
+- **Traffic capture**: captures in-app HTTP traffic and uploads it in batches to the central mock server (no system proxy, no certificates).
+- **Remote mock client**: pulls device-scoped enabled rules, matches locally on `Method + URL path`, and replays canned responses.
+- **Fail-open**: business requests are never blocked when the server is unreachable or rule sync fails.
+- **Debug-package only (SDK–integrator decoupling)**: the SDK makes **no Debug/Release decision itself** — it has no runtime switch and never probes the host build type. Whether (and how) to integrate is entirely the integrating app's build-time decision (see "Release isolation" below).
 
-## 必要平台差异（相对 iOS）
+## Integration (GitHub + JitPack, by version)
 
-| 项 | iOS（MockNetPackKit） | Android（本 SDK） |
-|---|---|---|
-| 拦截机制 | URLProtocol 全局注册 + swizzle（业务零改动） | OkHttp application interceptor（宿主一行注入） |
-| 持久化 | UserDefaults | SharedPreferences（需 `MockNetPack.initialize(context)`） |
-| 扫码 | AVCaptureSession | CameraX + ML Kit（AN-4） |
-| 并发/回调 | GCD 串行队列 + main dispatch | 协程单线程调度器 + Main dispatcher |
-| gzip | zlib deflateInit2(MAX_WBITS+16) | java.util.zip.GZIPOutputStream（同为标准 gzip） |
-| 系统信息 | Bundle ID / UIDevice | applicationId / Build.VERSION |
-
-## 仓库结构
-
-```
-MockNetPackAndroid/
-├── knowledgebase/           # 金字塔式知识库（overview/architecture/code-map，随实现补齐）
-├── mocknetpack/             # SDK 库模块（com.mocknetpack.android）
-│   ├── build.gradle.kts
-│   └── src/
-│       ├── main/java/com/mocknetpack/android/
-│       │   ├── MockNetPack.kt            # 门面（start/stop/state/callbacks/codec/connectByScan）
-│       │   ├── Models.kt                 # 契约模型（对齐 openapi/mocknetpack.yaml）
-│       │   └── internal/
-│       │       ├── connection/           # ConnectionController / ConnectionClient（AN-1）
-│       │       ├── capture/              # TrafficCaptureController / MockNetPackInterceptor（AN-2/3）
-│       │       ├── mock/                 # MockRuleController（AN-3）
-│       │       ├── codec/                # BinaryCodec（gzip，已实现）
-│       │       ├── store/                # DIDStore / ServerAddressStore（已实现）
-│       │       ├── scan/                 # QRConnectParser（已实现）/ QRScannerActivity（AN-4）
-│       │       └── log/                  # SDKLogger（已实现）
-│       └── test/java/...                 # 本地单测（QR 协议解析 / gzip）
-```
-
-## 本地构建与测试
-
-```bash
-cd Android/MockNetPackAndroid
-./gradlew :mocknetpack:assembleDebug      # 编译 SDK AAR
-./gradlew :mocknetpack:testDebugUnitTest  # 本地单测
-```
-
-## 接入方式（宿主 App，Debug-only）
+The SDK is published to GitHub and consumed through JitPack by version number. No local Maven installs, no code copy.
 
 ```kotlin
-// 1) 初始化（Application.onCreate，Debug 构建）
+// settings.gradle.kts — add the JitPack repository
+dependencyResolutionManagement {
+    repositories {
+        // ...existing repositories
+        maven(url = "https://jitpack.io")
+    }
+}
+
+// app/build.gradle.kts — Debug variant only (see "Release isolation")
+dependencies {
+    debugImplementation("com.github.cx-z:MockNetPackAndroid:1.0.0")
+}
+```
+
+To upgrade, just bump the version in the `debugImplementation` coordinate.
+
+## Usage
+
+Callers must **not hard-code the server address in code** — the server address is provided once by scanning the pairing QR code and is then persisted by the SDK (restart does not require re-scanning).
+
+```kotlin
+// 1) Initialize once in Application.onCreate (Debug build)
 MockNetPack.initialize(applicationContext)
 
-// 2) 将拦截器加入业务 OkHttpClient（每个客户端工厂一行）
+// 2) Add the interceptor to each business OkHttpClient factory (one line)
 val client = OkHttpClient.Builder()
     .addInterceptor(MockNetPack.interceptor())
     .build()
 
-// 3) 启动连接（直连服务器地址；或 connectByScan 扫码）
-MockNetPack.start(server = "http://<host>:4290/api/v1")
+// 3) Scan the pairing QR code (shows the server-side "Pair device" QR, e.g. from
+//    the Web management UI): the SDK probes the server, registers the device
+//    with the pairing token, persists the server address, and starts connecting.
+MockNetPack.connectByScan(activity) { result ->
+    when (result) {
+        is ConnectByScanResult.Success -> // connected; address saved
+        is ConnectByScanResult.Failure -> // see ConnectByScanError for classification
+    }
+}
 
-// 4) Release 隔离：debugImplementation 引入 SDK + R8 keep；产物校验不含 SDK 类
+// 4) Start (no-arg): reads the persisted server address + device ID and connects.
+//    Before the first scan this enters UNCONFIGURED state (no network, waits for scan).
+MockNetPack.start()
 ```
 
-详细接入与里程碑见技术方案文档。
+- First-time onboarding: scan once → `connectByScan` succeeds → address persisted → `start()` reconnects automatically on every launch (no re-scan).
+- To point the SDK at a different server, scan again (a failed scan never overwrites a saved address).
+
+### Server repository
+
+The MockNetPack central server (Go) lives at: **https://github.com/cx-z/MockNetPackageServer.git**
+
+It provides the HTTP endpoints the SDK talks to (`/api/v1/devices/register`, `/heartbeat`, `/traffic`, `/mock-rules`, pairing tokens), the Web management UI, and the Android pairing QR codes. See its README for server setup and the Web UI.
+
+## Release isolation (Debug-only, SDK–integrator decoupling)
+
+The requirement on the integrator is: **the Release artifact must not contain this SDK's code/symbols** (must be "not carried", not merely "not active"). The SDK itself does not self-inspect; the guarantee comes from the integrating app's build layer:
+
+1. SDK is pulled in via `debugImplementation` only (zero references in the Release dependency graph);
+2. all SDK call sites live in the `debug` source set (`src/debug/...`), so `main` code compiles without the SDK;
+3. CI verifies the Release APK dex contains no `com.mocknetpack.android.*` symbols (e.g. `dexdump` grep = 0 hits) and blocks the release otherwise.
+
+## Platform differences (vs iOS)
+
+| Item | iOS (MockNetPackKit) | Android (this SDK) |
+|---|---|---|
+| Capture mechanism | URLProtocol global registration + swizzle (zero business changes) | OkHttp application interceptor (one line per OkHttpClient factory) |
+| Persistence | UserDefaults | SharedPreferences (requires `MockNetPack.initialize(context)`) |
+| QR scan | AVCaptureSession | CameraX + ML Kit (bundled, no Play Services) |
+| Concurrency/callbacks | GCD serial queue + main dispatch | coroutine single-thread dispatcher + Main dispatcher |
+| gzip | zlib deflateInit2(MAX_WBITS+16) | java.util.zip.GZIPOutputStream (standard gzip) |
+| System info | Bundle ID / UIDevice | applicationId / Build.VERSION |
+
+## Repository structure
+
+```
+MockNetPackAndroid/
+├── jitpack.yml               # JitPack build config (JDK 17)
+├── mocknetpack/              # SDK library module (com.mocknetpack.android)
+│   ├── build.gradle.kts
+│   └── src/
+│       ├── main/java/com/mocknetpack/android/
+│       │   ├── MockNetPack.kt            # facade (initialize/interceptor/start/connectByScan/codec)
+│       │   ├── Models.kt                 # contract models
+│       │   └── internal/
+│       │       ├── connection/           # ConnectionController / ConnectionClient
+│       │       ├── capture/              # TrafficCaptureController / MockNetPackInterceptor
+│       │       ├── mock/                 # MockRuleController
+│       │       ├── codec/                # BinaryCodec (gzip)
+│       │       ├── store/                # DIDStore / ServerAddressStore
+│       │       ├── scan/                 # QRConnectParser / QRScannerActivity / ConnectByScanFlow
+│       │       └── log/                  # SDKLogger
+│       └── test/java/...                 # local unit tests
+```
+
+## Local build & test
+
+```bash
+cd MockNetPackAndroid
+./gradlew :mocknetpack:assembleDebug      # build the SDK AAR
+./gradlew :mocknetpack:testDebugUnitTest  # run unit tests
+```
+
+> On macOS, prefix Gradle commands with `JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"` (a plain `java` from the shell is unavailable).

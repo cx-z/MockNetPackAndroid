@@ -4,6 +4,7 @@
 /.idea
 .DS_Store
 /build
+/mocknetpack/build
 /captures
 .externalNativeBuild
 .cxx
