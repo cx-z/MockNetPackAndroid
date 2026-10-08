@@ -1,6 +1,10 @@
 jdk:
   - openjdk17
 
+# JitPack 构建器对 /build 目录偶发 git dubious ownership；全局豁免（JitPack 容器专用）。
+before_install:
+  - git config --global --add safe.directory '*'
+
 # JitPack 默认在根项目跑 publishToMavenLocal；SDK 发布任务位于子模块，
 # 故显式指定模块任务（JitPack 会自动附加 -Pgroup/-Pversion 覆盖发布坐标）。
 install:
