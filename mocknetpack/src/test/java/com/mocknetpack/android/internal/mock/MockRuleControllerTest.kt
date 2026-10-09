@@ -38,12 +38,12 @@ class MockRuleControllerTest {
         server = MockWebServer()
         server.start()
         MockRuleController.reset()
-        server.dispatcher = object : Dispatcher() {
+        server.setDispatcher(object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockWsResponse {
                 recordedRequests.add(request)
                 return handler(request)
             }
-        }
+        })
         handler = { MockWsResponse().setResponseCode(404) }
     }
 

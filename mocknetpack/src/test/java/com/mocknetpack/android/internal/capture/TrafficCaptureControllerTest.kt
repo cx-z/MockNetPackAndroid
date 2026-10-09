@@ -43,12 +43,12 @@ class TrafficCaptureControllerTest {
         TrafficCaptureController.flushIntervalMs = 60
         TrafficCaptureController.schedulerDispatcher = Dispatchers.Unconfined
         TrafficCaptureController.clientFactory = { ConnectionClient.create(it) }
-        server.dispatcher = object : Dispatcher() {
+        server.setDispatcher(object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 recordedRequests.add(request)
                 return handler(request)
             }
-        }
+        })
         handler = { req ->
             if (req.path!!.endsWith("/traffic")) {
                 MockResponse().setResponseCode(202).setBody("""{"accepted":true,"count":1}""")

@@ -43,12 +43,12 @@ class ConnectionControllerTest {
         server = MockWebServer()
         server.start()
         controller = newController()
-        server.dispatcher = object : Dispatcher() {
+        server.setDispatcher(object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 recordedRequests.add(request)
                 return handler(request)
             }
-        }
+        })
         handler = { MockResponse().setResponseCode(404) }
     }
 

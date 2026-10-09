@@ -6,11 +6,10 @@ import java.net.URI
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 
 /// 连接层 HTTP 错误（对齐 iOS ConnectionClientError）。
@@ -42,7 +41,7 @@ class ConnectionClient private constructor(
 ) {
 
     companion object {
-        private val JSON_MEDIA_TYPE = "application/json".toMediaType()
+        private val JSON_MEDIA_TYPE = MediaType.parse("application/json")!!
         private const val REQUEST_TIMEOUT_SECONDS = 10L
         private const val PROBE_TIMEOUT_SECONDS = 3L
 
@@ -103,8 +102,8 @@ class ConnectionClient private constructor(
     suspend fun post(path: String, body: JSONObject?): JSONObject = withContext(Dispatchers.IO) {
         val url = "$baseURL/$path"
         val requestBody: RequestBody = body?.let {
-            it.toString().toRequestBody(JSON_MEDIA_TYPE)
-        } ?: ByteArray(0).toRequestBody(JSON_MEDIA_TYPE)
+            RequestBody.create(JSON_MEDIA_TYPE, it.toString())
+        } ?: RequestBody.create(JSON_MEDIA_TYPE, ByteArray(0))
         val request = Request.Builder()
             .url(url)
             .post(requestBody)
@@ -151,9 +150,9 @@ class ConnectionClient private constructor(
     private fun executeJson(request: Request): JSONObject {
         try {
             client.newCall(request).execute().use { response ->
-                val code = response.code
+                val code = response.code()
                 if (code !in 200..299) throw ConnectionClientError.HttpStatus(code)
-                val bodyText = response.body?.string() ?: ""
+                val bodyText = response.body()?.string() ?: ""
                 return try {
                     JSONObject(bodyText)
                 } catch (e: Exception) {

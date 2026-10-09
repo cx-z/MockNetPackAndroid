@@ -12,10 +12,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -52,12 +52,12 @@ class MockNetPackInterceptorTest {
         TrafficCaptureController.schedulerDispatcher = Dispatchers.Unconfined
         TrafficCaptureController.clientFactory = { ConnectionClient.create(it) }
         client = OkHttpClient.Builder().addInterceptor(MockNetPackInterceptor()).build()
-        server.dispatcher = object : Dispatcher() {
+        server.setDispatcher(object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 recordedRequests.add(request)
                 return handler(request)
             }
-        }
+        })
         handler = { req ->
             when {
                 req.path!!.endsWith("/traffic") ->
@@ -98,7 +98,7 @@ class MockNetPackInterceptorTest {
 
     private fun businessGet(): String {
         val req = Request.Builder().url(server.url("/api/v1/business")).get().build()
-        client.newCall(req).execute().use { resp -> return resp.body?.string() ?: "" }
+        client.newCall(req).execute().use { resp -> return resp.body()?.string() ?: "" }
     }
 
     // MARK: - 拦截开关
@@ -121,7 +121,7 @@ class MockNetPackInterceptorTest {
             .header("X-MockNetPack-Skip", "1")
             .get()
             .build()
-        client.newCall(req).execute().use { resp -> resp.body?.string() }
+        client.newCall(req).execute().use { resp -> resp.body()?.string() }
         TrafficCaptureController.flush()
         Thread.sleep(150)
         assertEquals(0, countRequests("/traffic"))
@@ -159,9 +159,9 @@ class MockNetPackInterceptorTest {
         val body = "hello world body"
         val req = Request.Builder()
             .url(server.url("/api/v1/echo"))
-            .post(body.toRequestBody("text/plain".toMediaType()))
+            .post(RequestBody.create(MediaType.parse("text/plain"), body))
             .build()
-        client.newCall(req).execute().use { resp -> resp.body?.string() }
+        client.newCall(req).execute().use { resp -> resp.body()?.string() }
 
         // 转发目标收到完整请求体（快照重建不丢 body）。
         val echo = lastRequest("/api/v1/echo")!!
@@ -185,7 +185,7 @@ class MockNetPackInterceptorTest {
             }
         }
         val req = Request.Builder().url(server.url("/api/v1/business")).get().build()
-        client.newCall(req).execute().use { resp -> resp.body?.string() } // 消费触发 tee 完成
+        client.newCall(req).execute().use { resp -> resp.body()?.string() } // 消费触发 tee 完成
 
         TrafficCaptureController.flush()
         waitUntil { countRequests("/traffic") >= 1 }
@@ -245,8 +245,8 @@ class MockNetPackInterceptorTest {
 
         val req = Request.Builder().url(server.url("/api/v1/business")).get().build()
         val body = client.newCall(req).execute().use { resp ->
-            assertEquals(200, resp.code)
-            resp.body?.string()
+            assertEquals(200, resp.code())
+            resp.body()?.string()
         }
         assertEquals("""{"mocked":true,"hello":"world"}""", body)
 
@@ -291,8 +291,8 @@ class MockNetPackInterceptorTest {
 
         val req = Request.Builder().url(server.url("/api/v1/bin")).get().build()
         val bytes = client.newCall(req).execute().use { resp ->
-            assertEquals(200, resp.code)
-            resp.body?.bytes()
+            assertEquals(200, resp.code())
+            resp.body()?.bytes()
         }
         // 回放为原始字节（占位文本不被编码回放）。
         assertTrue(bytes.contentEquals(byteArrayOf(0x01, 0x02, 0x03, 0x7f.toByte())))
@@ -329,7 +329,7 @@ class MockNetPackInterceptorTest {
         TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
 
         val req = Request.Builder().url(server.url("/api/v1/enc")).get().build()
-        val bytes = client.newCall(req).execute().use { resp -> resp.body?.bytes() }
+        val bytes = client.newCall(req).execute().use { resp -> resp.body()?.bytes() }
         // 回放为 gzip 编码字节（编辑文本 → UTF-8 → gzip → 业务加密恒等）。
         assertEquals(0x1f, bytes!![0].toInt() and 0xff)
         assertEquals(0x8b, bytes[1].toInt() and 0xff)
@@ -363,12 +363,12 @@ class MockNetPackInterceptorTest {
 
         val req = Request.Builder().url(server.url("/api/v1/hdr")).get().build()
         client.newCall(req).execute().use { resp ->
-            assertEquals(201, resp.code)
+            assertEquals(201, resp.code())
             assertTrue("proto-res header 不得回放", resp.header("X-XC-Proto-Res") == null)
             assertEquals("keep-me", resp.header("X-Extra"))
             // Content-Type 缺省补 application/json。
             assertEquals("application/json", resp.header("Content-Type"))
-            resp.body?.string()
+            resp.body()?.string()
         }
     }
 }

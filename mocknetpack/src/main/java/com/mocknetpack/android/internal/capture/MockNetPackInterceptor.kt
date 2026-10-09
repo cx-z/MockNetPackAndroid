@@ -8,17 +8,16 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import okhttp3.Headers
 import okhttp3.Interceptor
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MediaType
 import okhttp3.Protocol
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody
-import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import okio.BufferedSource
 import okio.ForwardingSource
-import okio.buffer
+import okio.Okio
 
 /**
  * OkHttp 应用拦截器（iOS MockNetPackURLProtocol 的安卓等价物）。
@@ -48,7 +47,7 @@ class MockNetPackInterceptor : Interceptor {
         // 1) canInit 等价：capturing && http(s) && 非 skipHeader。
         if (!TrafficCaptureController.isCapturing) return chain.proceed(chain.request())
         val original = chain.request()
-        val scheme = original.url.scheme
+        val scheme = original.url().scheme()
         if (scheme != "http" && scheme != "https") return chain.proceed(original)
         if (original.header(MockNetPack.SKIP_HEADER) != null) return chain.proceed(original)
 
@@ -57,7 +56,7 @@ class MockNetPackInterceptor : Interceptor {
         val requestBodySnapshot = snapshotRequestBody(original)
 
         // 3) AN-3: Mock 匹配优先（命中 → serve 合成回包，不访问真实网络）。
-        val mock = MockRuleController.match(original.method, original.url.encodedPath)
+        val mock = MockRuleController.match(original.method(), original.url().encodedPath())
         if (mock != null) {
             return serve(mock, original, requestBodySnapshot, startNs)
         }
@@ -67,9 +66,9 @@ class MockNetPackInterceptor : Interceptor {
         val forwarded = original.newBuilder()
             .removeHeader(MockNetPack.SKIP_HEADER)
             .method(
-                original.method,
-                if (original.body != null) {
-                    requestBodySnapshot.toRequestBody(original.body?.contentType())
+                original.method(),
+                if (original.body() != null) {
+                    RequestBody.create(original.body()?.contentType(), requestBodySnapshot)
                 } else {
                     null
                 },
@@ -91,7 +90,7 @@ class MockNetPackInterceptor : Interceptor {
                 recordedBody = null,
                 totalBodyBytes = 0,
                 error = e.message ?: e.javaClass.simpleName,
-                contentType = original.body?.contentType()?.toString(),
+                contentType = original.body()?.contentType()?.toString(),
             )
             TrafficCaptureController.record(entry)
             throw e
@@ -100,12 +99,12 @@ class MockNetPackInterceptor : Interceptor {
         // 4) 响应体 tee 采集：body 消费完成（EOF 或 close）时组装条目。
         //    不整体缓冲大响应；录制缓冲上限 1MB。
         val tee = TeeResponseBody(
-            response.body ?: ByteArray(0).toResponseBody(null),
+            response.body() ?: ResponseBody.create(null, ByteArray(0)),
             limit = MockNetPack.BODY_LIMIT_BYTES,
         )
-        val bodyContentType = response.body?.contentType()?.toString()
-        val responseHeaders = response.headers.toMultimap()
-        val statusCode = response.code
+        val bodyContentType = response.body()?.contentType()?.toString()
+        val responseHeaders = response.headers().toMultimap()
+        val statusCode = response.code()
         tee.onComplete = { body ->
             TrafficCaptureController.record(
                 buildEntry(
@@ -154,7 +153,7 @@ class MockNetPackInterceptor : Interceptor {
         // bodyBase64，因此原始字节优先不影响已编辑规则。
         val bodyBytes: ByteArray = run {
             val fromBase64 = mock.bodyBase64?.let { b64 ->
-                runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull()
+                com.mocknetpack.android.internal.util.SDKBase64.decode(b64)
             }
             if (fromBase64 != null && fromBase64.isNotEmpty()) {
                 fromBase64
@@ -183,7 +182,7 @@ class MockNetPackInterceptor : Interceptor {
             .code(mock.statusCode)
             .message("Mock")
             .headers(Headers.Builder().apply { for ((k, v) in filtered) add(k, v) }.build())
-            .body(bodyBytes.toResponseBody(contentType?.toMediaTypeOrNull()))
+            .body(ResponseBody.create(contentType?.let { MediaType.parse(it) }, bodyBytes))
             .build()
     }
 
@@ -202,14 +201,14 @@ class MockNetPackInterceptor : Interceptor {
         val reqParts = bodyParts(requestBodyBytes, requestBodyBytes.size.toLong())
         return TrafficEntry(
             timestamp = TrafficCaptureController.rfc3339(),
-            method = original.method,
-            url = original.url.toString(),
-            path = original.url.encodedPath,
-            query = original.url.encodedQuery ?: "",
-            requestHeaders = original.headers.toMultimap(),
+            method = original.method(),
+            url = original.url().toString(),
+            path = original.url().encodedPath(),
+            query = original.url().encodedQuery() ?: "",
+            requestHeaders = original.headers().toMultimap(),
             requestBody = reqParts.first,
             requestBodyBase64 = reqParts.second,
-            requestBodyDecoded = decodedBody(requestBodyBytes, original.headers["Content-Type"], isRequest = true),
+            requestBodyDecoded = decodedBody(requestBodyBytes, original.headers()["Content-Type"], isRequest = true),
             statusCode = mock.statusCode,
             responseHeaders = responseHeaders.mapValues { listOf(it.value) },
             responseBody = mock.body,
@@ -245,14 +244,14 @@ class MockNetPackInterceptor : Interceptor {
         val respContentType = contentType
         return TrafficEntry(
             timestamp = TrafficCaptureController.rfc3339(),
-            method = request.method,
-            url = request.url.toString(),
-            path = request.url.encodedPath,
-            query = request.url.encodedQuery ?: "",
-            requestHeaders = request.headers.toMultimap(),
+            method = request.method(),
+            url = request.url().toString(),
+            path = request.url().encodedPath(),
+            query = request.url().encodedQuery() ?: "",
+            requestHeaders = request.headers().toMultimap(),
             requestBody = reqParts.first,
             requestBodyBase64 = reqParts.second,
-            requestBodyDecoded = decodedBody(requestBodyBytes, request.headers["Content-Type"], isRequest = true),
+            requestBodyDecoded = decodedBody(requestBodyBytes, request.headers()["Content-Type"], isRequest = true),
             statusCode = statusCode,
             responseHeaders = responseHeaders,
             responseBody = respParts?.first,
@@ -277,7 +276,7 @@ class MockNetPackInterceptor : Interceptor {
         return if (text != null) {
             text to null
         } else {
-            "[binary $fullSize bytes]" to java.util.Base64.getEncoder().encodeToString(sample)
+            "[binary $fullSize bytes]" to com.mocknetpack.android.internal.util.SDKBase64.encode(sample)
         }
     }
 
@@ -295,7 +294,7 @@ class MockNetPackInterceptor : Interceptor {
 
     /// 请求体快照：读一次并返回字节（转发用快照重建，保证不丢 body）。
     private fun snapshotRequestBody(request: Request): ByteArray {
-        val body = request.body ?: return ByteArray(0)
+        val body = request.body() ?: return ByteArray(0)
         val buffer = Buffer()
         return try {
             body.writeTo(buffer)
@@ -340,7 +339,7 @@ internal class TeeResponseBody(
                     if (recordedBytes < limit) {
                         val room = minOf(limit - recordedBytes, n)
                         // 新读入数据位于 sink 尾部 [size-n, size)，复制不消费。
-                        sink.copyTo(recorded, sink.size - n, room)
+                        sink.copyTo(recorded, sink.size() - n, room)
                         recordedBytes += room
                     }
                 } else if (n == -1L) {
@@ -349,7 +348,7 @@ internal class TeeResponseBody(
                 return n
             }
         }
-        return tee.buffer()
+        return Okio.buffer(tee)
     }
 
     override fun close() {

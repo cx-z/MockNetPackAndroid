@@ -45,12 +45,12 @@ class ConnectByScanFlowTest {
         Dispatchers.setMain(Dispatchers.Unconfined)
         server = MockWebServer()
         server.start()
-        server.dispatcher = object : Dispatcher() {
+        server.setDispatcher(object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 recordedRequests.add(request)
                 return handler(request)
             }
-        }
+        })
         handler = { req ->
             when {
                 req.path!!.endsWith("/__mocknetpack_probe__") ->

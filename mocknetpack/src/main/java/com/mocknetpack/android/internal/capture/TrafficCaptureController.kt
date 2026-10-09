@@ -420,7 +420,7 @@ object TrafficCaptureController {
 
     // MARK: - 辅助
 
-    /// RFC3339 时间戳（对齐 iOS ISO8601 编码；minSdk 24 无 java.time，用 SimpleDateFormat）。
+    /// RFC3339 时间戳（对齐 iOS ISO8601 编码；minSdk 21 无 java.time，用 SimpleDateFormat）。
     internal fun rfc3339(date: Date = Date()): String {
         val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
         fmt.timeZone = TimeZone.getTimeZone("UTC")

@@ -15,7 +15,8 @@ android {
     }
 
     defaultConfig {
-        minSdk = 24
+        // 对齐宿主 minSdk 21（OkHttp 3.12.x 也是最后一条支持 API 21 的主线）。
+        minSdk = 21
         consumerProguardFiles("consumer-rules.pro")
     }
 

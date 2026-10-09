@@ -1,9 +1,11 @@
 [versions]
 agp = "9.3.0"
-okhttp = "4.12.0"
+# OkHttp 3.12.x 是最后一条支持 Android 4.x / minSdk 21 的主线（Java 8，Okio 1.x）；
+# 4.x 起强制 Kotlin + Okio 2.x，且部分宿主仍锁定 3.x，故 SDK 降到 3.12.8 对齐。
+okhttp = "3.12.8"
 coroutines = "1.8.1"
 junit = "4.13.2"
-mockwebserver = "4.12.0"
+mockwebserver = "3.12.8"
 orgjson = "20240303"
 camerax = "1.3.4"
 mlkit-barcode = "17.2.0"
