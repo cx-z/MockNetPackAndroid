@@ -1,7 +1,7 @@
 plugins {
     alias(libs.plugins.android.library)
     // 发布方式：SDK 发布到 GitHub（cx-z/MockNetPackAndroid），接入方经
-    // JitPack 按版本号集成：debugImplementation("com.github.cx-z:MockNetPackAndroid:1.0.0")。
+    // JitPack 按版本号集成：debugImplementation("com.github.cx-z:MockNetPackAndroid:1.0.1")。
     // POM 携带完整传递依赖（okhttp api / CameraX / ML Kit / activity / coroutines）。
     id("maven-publish")
 }

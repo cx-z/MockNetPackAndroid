@@ -6,21 +6,28 @@ import com.mocknetpack.android.MockRule
 import com.mocknetpack.android.internal.connection.ConnectionClient
 import com.mocknetpack.android.internal.mock.MockRuleController
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import okhttp3.Cache
+import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import okio.Buffer
+import okio.BufferedSink
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -99,6 +106,50 @@ class MockNetPackInterceptorTest {
     private fun businessGet(): String {
         val req = Request.Builder().url(server.url("/api/v1/business")).get().build()
         client.newCall(req).execute().use { resp -> return resp.body()?.string() ?: "" }
+    }
+
+    // MARK: - AN7 测试辅助（下游拦截器 / 计数 body）
+
+    private fun headerInterceptor(name: String, value: String): Interceptor = Interceptor { chain ->
+        chain.proceed(chain.request().newBuilder().header(name, value).build())
+    }
+
+    private fun downstreamRewriteInterceptor(): Interceptor = Interceptor { chain ->
+        val rewritten = chain.request().newBuilder()
+            .url(server.url("/api/v1/rewritten"))
+            .header("X-Downstream", "1")
+            .method("POST", RequestBody.create(MediaType.parse("application/json"), """{"downstream":true}"""))
+            .build()
+        chain.proceed(rewritten)
+    }
+
+    private fun replaceBodyInterceptor(body: RequestBody): Interceptor = Interceptor { chain ->
+        chain.proceed(chain.request().newBuilder().method("POST", body).build())
+    }
+
+    private fun syntheticResponseInterceptor(): Interceptor = Interceptor { chain ->
+        Response.Builder()
+            .request(chain.request())
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("Synthetic")
+            .body(ResponseBody.create(MediaType.parse("application/json"), """{"synthetic":true}"""))
+            .build()
+    }
+
+    /// 计数请求体：记录 writeTo 被调用次数（验证一次性 body 不被二次消费）。
+    private class CountingBody(private val text: String) : RequestBody() {
+        var writeCount = 0
+            private set
+
+        override fun contentType(): MediaType? = MediaType.parse("text/plain")
+
+        override fun contentLength(): Long = text.toByteArray().size.toLong()
+
+        override fun writeTo(sink: BufferedSink) {
+            writeCount++
+            sink.writeUtf8(text)
+        }
     }
 
     // MARK: - 拦截开关
@@ -370,5 +421,297 @@ class MockNetPackInterceptorTest {
             assertEquals("application/json", resp.header("Content-Type"))
             resp.body()?.string()
         }
+    }
+
+    // MARK: - AN7 记录来源修正（MockWebServer 验证）
+
+    /// 下游测试拦截器修改 URL / 请求头 / 请求体 → SDK 记录能反映这些修改。
+    @Test
+    fun `downstream interceptor url header body changes are recorded`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        val rewriteClient = OkHttpClient.Builder()
+            .addInterceptor(MockNetPackInterceptor())
+            .addInterceptor(downstreamRewriteInterceptor())
+            .build()
+        val req = Request.Builder()
+            .url(server.url("/api/v1/business"))
+            .post(RequestBody.create(MediaType.parse("text/plain"), "orig body"))
+            .build()
+        rewriteClient.newCall(req).execute().use { resp -> resp.body()?.string() }
+
+        // 服务端收到的是下游改写后的请求。
+        assertEquals("/api/v1/rewritten", lastRequest("/api/v1/rewritten")?.path)
+        assertEquals("""{"downstream":true}""", lastRequest("/api/v1/rewritten")!!.body.readUtf8())
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        // URL 与头反映下游修改；body 被下游替换为一次性新实例 → 不可安全重读 → unavailable。
+        // 头键保留原始大小写（headersToMultimap，对齐 iOS/Web 展示）。
+        assertTrue(entry.optString("url").endsWith("/api/v1/rewritten"))
+        assertEquals("1", entry.optJSONObject("requestHeaders")!!.optJSONArray("X-Downstream")!!.getString(0))
+        assertEquals("[body unavailable]", entry.optString("requestBody"))
+    }
+
+    /// networkResponse.request 的 URL / 头 / 可重复读取 body 与服务端收到的请求对应。
+    @Test
+    fun `recorded request matches what server received`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        val body = "hello world body"
+        val req = Request.Builder()
+            .url(server.url("/api/v1/business"))
+            .post(RequestBody.create(MediaType.parse("text/plain"), body))
+            .build()
+        client.newCall(req).execute().use { resp -> resp.body()?.string() }
+
+        val received = lastRequest("/api/v1/business")!!
+        assertEquals(body, received.body.readUtf8())
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        val reqHeaders = entry.optJSONObject("requestHeaders")!!
+        // 记录内容与服务端实际收到的一致（含 Bridge 自动补头；键保留原始大小写）。
+        assertEquals(body, entry.optString("requestBody"))
+        assertEquals(received.getHeader("Content-Type"), reqHeaders.optJSONArray("Content-Type")!!.getString(0))
+        assertEquals(received.getHeader("Host"), reqHeaders.optJSONArray("Host")!!.getString(0))
+    }
+
+    /// OkHttp 自动添加的 HTTP 请求头能够正确记录（Host / User-Agent / Content-Length）。
+    @Test
+    fun `okhttp auto added headers are recorded`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        val req = Request.Builder()
+            .url(server.url("/api/v1/business"))
+            .post(RequestBody.create(MediaType.parse("text/plain"), "payload"))
+            .build()
+        client.newCall(req).execute().use { resp -> resp.body()?.string() }
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        val reqHeaders = entry.optJSONObject("requestHeaders")!!
+        assertTrue(reqHeaders.has("Host"))
+        assertTrue(reqHeaders.optJSONArray("User-Agent")!!.getString(0).startsWith("okhttp/"))
+        assertTrue(reqHeaders.has("Content-Length"))
+    }
+
+    /// 调整拦截器顺序后，SDK 不需要业务条件判断（前置拦截器补的头同样被记录）。
+    @Test
+    fun `interceptor order does not affect recording`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        // SDK 位于补头拦截器之后。
+        val sdkLastClient = OkHttpClient.Builder()
+            .addInterceptor(headerInterceptor("X-First", "1"))
+            .addInterceptor(MockNetPackInterceptor())
+            .build()
+        val req = Request.Builder().url(server.url("/api/v1/business")).get().build()
+        sdkLastClient.newCall(req).execute().use { resp -> resp.body()?.string() }
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        assertEquals("1", entry.optJSONObject("requestHeaders")!!.optJSONArray("X-First")!!.getString(0))
+    }
+
+    /// 缓存命中：无 networkResponse，记录来自 response.request，不访问服务端。
+    @Test
+    fun `cache hit records from response request without network send`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        val cacheDir = File.createTempFile("mnpcache", "").apply { delete(); mkdirs() }
+        try {
+            val cacheClient = OkHttpClient.Builder()
+                .cache(Cache(cacheDir, 10 * 1024 * 1024))
+                .addInterceptor(MockNetPackInterceptor())
+                .addInterceptor(headerInterceptor("X-Host-Hdr", "h1"))
+                .build()
+            handler = { req ->
+                when {
+                    req.path!!.endsWith("/traffic") ->
+                        MockResponse().setResponseCode(202).setBody("""{"accepted":true,"count":1}""")
+                    req.path!!.endsWith("/api/v1/business") ->
+                        MockResponse().setResponseCode(200)
+                            .setHeader("Content-Type", "application/json")
+                            .setHeader("Cache-Control", "max-age=60")
+                            .setBody("""{"hello":"world"}""")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            val req = Request.Builder().url(server.url("/api/v1/business")).get().build()
+            cacheClient.newCall(req).execute().use { resp -> resp.body()?.string() }
+            cacheClient.newCall(req).execute().use { resp -> resp.body()?.string() }
+            // 第二次请求缓存命中，未发到服务端。
+            assertEquals(1, countRequests("/api/v1/business"))
+
+            TrafficCaptureController.flush()
+            waitUntil { countRequests("/traffic") >= 1 }
+            val entries = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!
+            assertEquals(2, entries.length())
+            // 缓存命中条目仍正常记录（URL 来自 response.request，与本次调用一致；
+            // 应用层头 X-Host-Hdr 保留 —— 缓存命中不宣称网络字节级请求）。
+            val cachedEntry = entries.getJSONObject(1)
+            assertTrue(cachedEntry.optString("url").endsWith("/api/v1/business"))
+            assertEquals(200, cachedEntry.optInt("statusCode"))
+            assertEquals("h1", cachedEntry.optJSONObject("requestHeaders")!!.optJSONArray("X-Host-Hdr")!!.getString(0))
+        } finally {
+            cacheDir.deleteRecursively()
+        }
+    }
+
+    /// 其他拦截器直接合成响应（不 proceed）：无 networkResponse，记录正常且不访问网络。
+    @Test
+    fun `synthetic response without network is recorded from response request`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        val syntheticClient = OkHttpClient.Builder()
+            .addInterceptor(MockNetPackInterceptor())
+            .addInterceptor(syntheticResponseInterceptor())
+            .build()
+        val req = Request.Builder().url(server.url("/api/v1/business")).get().build()
+        val respBody = syntheticClient.newCall(req).execute().use { resp ->
+            assertEquals(200, resp.code())
+            resp.body()?.string()
+        }
+        assertEquals("""{"synthetic":true}""", respBody)
+        // 未访问真实服务端。
+        assertEquals(0, countRequests("/api/v1/business"))
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        assertEquals(200, entry.optInt("statusCode"))
+        assertEquals("""{"synthetic":true}""", entry.optString("responseBody"))
+        assertTrue(entry.optString("url").endsWith("/api/v1/business"))
+    }
+
+    /// 请求失败：保存原始请求与错误，不伪造最终请求；异常照常上抛。
+    @Test
+    fun `failed request records original and error and rethrows`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        // 业务请求指向不可达端口（连接拒绝）；上传端点 baseURL() 仍是存活 server。
+        val deadURL = "http://127.0.0.1:1/api/v1/business"
+        val req = Request.Builder().url(deadURL).get().build()
+        var thrown: java.io.IOException? = null
+        try {
+            client.newCall(req).execute().use { resp -> resp.body()?.string() }
+        } catch (e: java.io.IOException) {
+            thrown = e
+        }
+        assertTrue("expected IOException, got $thrown", thrown != null)
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        assertEquals(deadURL, entry.optString("url"))
+        assertTrue(entry.has("error"))
+        assertTrue(!entry.has("statusCode"))
+    }
+
+    /// 一次性 / 流式请求体不会被采集逻辑二次消费：writeTo 仅被网络调用一次，记录 unavailable。
+    @Test
+    fun `one shot replaced body is not re consumed and marked unavailable`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        val counting = CountingBody("replaced payload")
+        val replacingClient = OkHttpClient.Builder()
+            .addInterceptor(MockNetPackInterceptor())
+            .addInterceptor(replaceBodyInterceptor(counting))
+            .build()
+        val req = Request.Builder()
+            .url(server.url("/api/v1/business"))
+            .post(RequestBody.create(MediaType.parse("text/plain"), "orig"))
+            .build()
+        replacingClient.newCall(req).execute().use { resp -> resp.body()?.string() }
+
+        // 服务端收到替换后的 body（转发成功，只消费一次）。
+        assertEquals("replaced payload", lastRequest("/api/v1/business")!!.body.readUtf8())
+        assertEquals(1, counting.writeCount)
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        assertEquals("[body unavailable]", entry.optString("requestBody"))
+        assertTrue(entry.optString("url").endsWith("/api/v1/business"))
+    }
+
+    /// 超限文本请求体：记录截断样本 + [truncated N bytes] 前缀（identity 匹配路径）。
+    @Test
+    fun `large text request body is recorded truncated with size prefix`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        val bigText = "x".repeat(1_050_000) // > BODY_LIMIT_BYTES (1MB)
+        val req = Request.Builder()
+            .url(server.url("/api/v1/business"))
+            .post(RequestBody.create(MediaType.parse("text/plain"), bigText))
+            .build()
+        client.newCall(req).execute().use { resp -> resp.body()?.string() }
+        assertEquals(bigText, lastRequest("/api/v1/business")!!.body.readUtf8())
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        val body = entry.optString("requestBody")
+        assertTrue(body.startsWith("[truncated 1050000 bytes] "))
+        assertTrue(body.length < 1_050_000) // 仅截断样本，不携带全量
+    }
+
+    /// 超限二进制请求体：记录 [binary N bytes] 占位 + base64 样本（identity 匹配路径）。
+    @Test
+    fun `large binary request body is recorded with binary placeholder`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        val bigBytes = ByteArray(1_050_000) { 0xFF.toByte() } // 非 UTF-8，> BODY_LIMIT_BYTES
+        val req = Request.Builder()
+            .url(server.url("/api/v1/business"))
+            .post(RequestBody.create(MediaType.parse("application/octet-stream"), bigBytes))
+            .build()
+        client.newCall(req).execute().use { resp -> resp.body()?.string() }
+        assertEquals(1_050_000, lastRequest("/api/v1/business")!!.body.readByteArray().size)
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        assertEquals("[binary 1050000 bytes]", entry.optString("requestBody"))
+        assertTrue(entry.has("requestBodyBase64"))
+        assertTrue(entry.optString("requestBodyBase64").isNotEmpty())
+    }
+
+    /// 重定向：记录最终响应关联请求（最终 URL），不宣称记录所有重定向过程。
+    @Test
+    fun `redirect records final response associated request`() {
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        handler = { req ->
+            when {
+                req.path!!.endsWith("/traffic") ->
+                    MockResponse().setResponseCode(202).setBody("""{"accepted":true,"count":1}""")
+                req.path!!.endsWith("/api/v1/redirect") ->
+                    MockResponse().setResponseCode(302)
+                        .setHeader("Location", server.url("/api/v1/final").toString())
+                        .setBody("")
+                req.path!!.endsWith("/api/v1/final") ->
+                    MockResponse().setResponseCode(200).setBody("""{"ok":true}""")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val req = Request.Builder().url(server.url("/api/v1/redirect")).get().build()
+        val body = client.newCall(req).execute().use { resp ->
+            assertEquals(200, resp.code())
+            resp.body()?.string()
+        }
+        assertEquals("""{"ok":true}""", body)
+        assertEquals(1, countRequests("/api/v1/redirect"))
+        assertEquals(1, countRequests("/api/v1/final"))
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        assertTrue(entry.optString("url").endsWith("/api/v1/final"))
     }
 }

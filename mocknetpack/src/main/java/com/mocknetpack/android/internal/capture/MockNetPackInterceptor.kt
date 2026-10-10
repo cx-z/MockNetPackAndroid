@@ -82,7 +82,7 @@ class MockNetPackInterceptor : Interceptor {
             // 请求失败：记录 error 条目（失败请求不保留状态码/响应字段）并上抛。
             val entry = buildEntry(
                 request = original,
-                requestBodyBytes = requestBodySnapshot,
+                requestBody = RequestBodyRecord(requestBodySnapshot, requestBodySnapshot.size.toLong(), false),
                 startNs = startNs,
                 response = null,
                 statusCode = null,
@@ -96,6 +96,17 @@ class MockNetPackInterceptor : Interceptor {
             throw e
         }
 
+        // AN7：记录来源修正 —— proceed 返回后选择与最终网络请求一致的请求。
+        // networkResponse.request 含 Bridge 补全头（Host/User-Agent/Content-Length 等），
+        // 最接近实际发送的请求；无 networkResponse（缓存命中/合成响应）时回退
+        // response.request。URL/method/headers/body 统一取自该选定请求，不再混用
+        // 链入口 original —— 记录点早于下游补头正是"请求头为空"的根因。
+        // 记录为"响应侧关联请求"，不承诺底层字节级抓包（不覆盖重定向中间过程）。
+        val selected = response.networkResponse()?.request() ?: response.request()
+        // 请求体：仅当 selected.body() 与 SDK 自建转发体是同一实例（可重复读）
+        // 时才做快照；被下游替换的一次性/流式体标记 unavailable，不二次消费。
+        val selectedBody = snapshotSelectedBody(selected, forwarded, requestBodySnapshot)
+
         // 4) 响应体 tee 采集：body 消费完成（EOF 或 close）时组装条目。
         //    不整体缓冲大响应；录制缓冲上限 1MB。
         val tee = TeeResponseBody(
@@ -103,13 +114,13 @@ class MockNetPackInterceptor : Interceptor {
             limit = MockNetPack.BODY_LIMIT_BYTES,
         )
         val bodyContentType = response.body()?.contentType()?.toString()
-        val responseHeaders = response.headers().toMultimap()
+        val responseHeaders = headersToMultimap(response.headers())
         val statusCode = response.code()
         tee.onComplete = { body ->
             TrafficCaptureController.record(
                 buildEntry(
-                    request = original,
-                    requestBodyBytes = requestBodySnapshot,
+                    request = selected,
+                    requestBody = selectedBody,
                     startNs = startNs,
                     response = response,
                     statusCode = statusCode,
@@ -205,7 +216,7 @@ class MockNetPackInterceptor : Interceptor {
             url = original.url().toString(),
             path = original.url().encodedPath(),
             query = original.url().encodedQuery() ?: "",
-            requestHeaders = original.headers().toMultimap(),
+            requestHeaders = headersToMultimap(original.headers()),
             requestBody = reqParts.first,
             requestBodyBase64 = reqParts.second,
             requestBodyDecoded = decodedBody(requestBodyBytes, original.headers()["Content-Type"], isRequest = true),
@@ -226,9 +237,11 @@ class MockNetPackInterceptor : Interceptor {
     }
 
     /// 组装一条 TrafficEntry（mocked=false；转发路径）。
+    /// requestBody 为选定请求体的记录快照（AN7）：URL/method/headers/body
+    /// 统一出自 request，不再与链入口 original 混用。
     private fun buildEntry(
         request: Request,
-        requestBodyBytes: ByteArray,
+        requestBody: RequestBodyRecord,
         startNs: Long,
         response: Response?,
         statusCode: Int?,
@@ -239,7 +252,7 @@ class MockNetPackInterceptor : Interceptor {
         contentType: String?,
     ): TrafficEntry {
         val durationMs = ((System.nanoTime() - startNs) / 1_000_000).toInt().coerceAtLeast(0)
-        val reqParts = bodyParts(requestBodyBytes, requestBodyBytes.size.toLong())
+        val reqParts = requestBodyParts(requestBody)
         val respParts = recordedBody?.let { bodyParts(it, totalBodyBytes) }
         val respContentType = contentType
         return TrafficEntry(
@@ -248,10 +261,10 @@ class MockNetPackInterceptor : Interceptor {
             url = request.url().toString(),
             path = request.url().encodedPath(),
             query = request.url().encodedQuery() ?: "",
-            requestHeaders = request.headers().toMultimap(),
+            requestHeaders = headersToMultimap(request.headers()),
             requestBody = reqParts.first,
             requestBodyBase64 = reqParts.second,
-            requestBodyDecoded = decodedBody(requestBodyBytes, request.headers()["Content-Type"], isRequest = true),
+            requestBodyDecoded = decodedBody(requestBody.sampleBytes, request.headers()["Content-Type"], isRequest = true),
             statusCode = statusCode,
             responseHeaders = responseHeaders,
             responseBody = respParts?.first,
@@ -301,6 +314,61 @@ class MockNetPackInterceptor : Interceptor {
             buffer.readByteArray()
         } catch (_: IOException) {
             ByteArray(0)
+        }
+    }
+
+    /// 选定请求体的记录快照（AN7）：请求体字节 + 原始大小 + 可用性。
+    /// sampleBytes 为入口快照的原始字节，未额外截断 —— 展示层统一在
+    /// bodyParts / decodedBody 内按 BODY_LIMIT_BYTES 截断采样（绝不重建发送）；
+    /// 注意：同一实例路径直接复用入口全量快照，大请求体在响应体消费完成前
+    /// 会常驻全量字节（记录侧内存取舍，展示不受影响）。
+    /// fullSize 为原始总大小（binary 占位 / truncated 前缀用）。
+    /// unavailable=true 表示无法安全重复读取，未二次消费，展示 [body unavailable]。
+    private data class RequestBodyRecord(
+        val sampleBytes: ByteArray,
+        val fullSize: Long,
+        val unavailable: Boolean,
+    )
+
+    /// AN7：响应后对选定请求体做安全快照（有上限，仅记录展示，绝不重建发送）。
+    /// 仅当 selected.body() 与 SDK 自建转发体（forwarded.body()）是同一实例时，
+    /// 才确认可重复读：forwarded.body() 是 SDK 用 requestBodySnapshot 字节数组
+    /// 构建的背衬体（RequestBody.create(byte[])），同一实例即字节可证明相同，
+    /// 直接复用入口快照，避免对大 body 做第二次全量重读（F2）。
+    /// 否则不触碰、不二次消费，标记 unavailable —— 覆盖一次性 / 流式 / 被下游
+    /// 替换的请求体。
+    private fun snapshotSelectedBody(
+        selected: Request,
+        forwarded: Request,
+        snapshotBytes: ByteArray,
+    ): RequestBodyRecord {
+        val body = selected.body()
+        if (body == null) return RequestBodyRecord(ByteArray(0), 0, false)
+        if (body !== forwarded.body()) return RequestBodyRecord(ByteArray(0), 0, true)
+        return RequestBodyRecord(snapshotBytes, snapshotBytes.size.toLong(), false)
+    }
+
+    /// 头字典（保留原始大小写，对齐 iOS allHTTPHeaderFields 与 Web 展示习惯；
+    /// 不使用 Headers.toMultimap() 的小写键 —— 历史问题修复）。多值按原顺序。
+    private fun headersToMultimap(headers: Headers): Map<String, List<String>> {
+        val result = LinkedHashMap<String, MutableList<String>>()
+        for (i in 0 until headers.size()) {
+            result.getOrPut(headers.name(i)) { mutableListOf() }.add(headers.value(i))
+        }
+        return result
+    }
+
+    /// 请求体展示（AN7）：unavailable → [body unavailable]；文本超限 → 加
+    /// [truncated N bytes] 前缀；二进制 / 常规走 bodyParts（占位 + base64 样本）。
+    private fun requestBodyParts(record: RequestBodyRecord): Pair<String, String?> {
+        if (record.unavailable) return "[body unavailable]" to null
+        val parts = bodyParts(record.sampleBytes, record.fullSize)
+        val truncatedText = record.fullSize > MockNetPack.BODY_LIMIT_BYTES.toInt() &&
+            parts.second == null && parts.first.isNotEmpty()
+        return if (truncatedText) {
+            "[truncated ${record.fullSize} bytes] ${parts.first}" to null
+        } else {
+            parts
         }
     }
 }
