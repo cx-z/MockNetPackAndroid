@@ -1,123 +1,148 @@
 # MockNetPackAndroid
 
-MockNetPack's **Android Debug SDK** — an in-app HTTP capture/upload and remote mock client (the iOS counterpart is `iOS/MockNetPackKit` in the server repo).
+MockNetPack's Android debug SDK captures HTTP/HTTPS traffic through an OkHttp application interceptor, uploads it in batches, synchronizes device-scoped rules, and returns mock responses locally. No system proxy, VPN, or capture certificate is required.
 
-> Current version **1.0.0**. Contains the connection layer (registration/heartbeat/session state), the OkHttp capture interceptor, the remote mock client, and the QR scan connection flow.
+The project release version is **1.0.1**, as declared in `gradle.properties` and the repository tag. The runtime `MockNetPack.VERSION` still reports `1.0.0` during registration; use the release version when selecting the dependency.
 
-## What it does
+## Platform requirements
 
-Fully aligned with the iOS SDK except for necessary platform differences:
+| Item | Current configuration |
+|---|---|
+| Minimum Android version | API 21 |
+| SDK build configuration | compileSdk 36 / minor API 1, AGP 9.3.0 |
+| Build JDK | JitPack uses JDK 17; Java compilation targets 11 |
+| Business network integration | OkHttp application interceptor; current dependency is OkHttp 3.12.8 |
+| QR scanning | CameraX + bundled ML Kit barcode, without Google Play Services |
 
-- **Traffic capture**: captures in-app HTTP traffic and uploads it in batches to the central mock server (no system proxy, no certificates).
-- **Remote mock client**: pulls device-scoped enabled rules, matches locally on `Method + URL path`, and replays canned responses.
-- **Fail-open**: business requests are never blocked when the server is unreachable or rule sync fails.
-- **Debug-package only (SDK–integrator decoupling)**: the SDK makes **no Debug/Release decision itself** — it has no runtime switch and never probes the host build type. Whether (and how) to integrate is entirely the integrating app's build-time decision (see "Release isolation" below).
+Capture covers only OkHttpClient instances that include the interceptor. Initializing the SDK does not automatically capture other HTTP clients, WebView, or socket traffic.
 
-## Integration (GitHub + JitPack, by version)
+## Versioned integration
 
-The SDK is published to GitHub and consumed through JitPack by version number. No local Maven installs, no code copy.
+SDK repository: [MockNetPackAndroid](https://github.com/cx-z/MockNetPackAndroid). Add JitPack to the host project and include the SDK only in debug variants:
 
 ```kotlin
-// settings.gradle.kts — add the JitPack repository
+// settings.gradle.kts
 dependencyResolutionManagement {
     repositories {
-        // ...existing repositories
+        google()
+        mavenCentral()
         maven(url = "https://jitpack.io")
     }
 }
 
-// app/build.gradle.kts — Debug variant only (see "Release isolation")
+// app/build.gradle.kts
 dependencies {
-    debugImplementation("com.github.cx-z:MockNetPackAndroid:1.0.0")
+    debugImplementation("com.github.cx-z:MockNetPackAndroid:1.0.1")
 }
 ```
 
-To upgrade, just bump the version in the `debugImplementation` coordinate.
+Preserve existing repository configuration instead of duplicating the entire block. The SDK publication includes transitive OkHttp, CameraX, ML Kit, Activity, and coroutine dependencies. Check the host's resolved OkHttp / AndroidX dependency versions during integration.
 
-## Usage
+## Initialization, interception, and pairing
 
-Callers must **not hard-code the server address in code** — the server address is provided once by scanning the pairing QR code and is then persisted by the SDK (restart does not require re-scanning).
+Place SDK calls in debug implementations under `src/debug/...`:
 
 ```kotlin
-// 1) Initialize once in Application.onCreate (Debug build)
-MockNetPack.initialize(applicationContext)
+import com.mocknetpack.android.MockNetPack
+import okhttp3.OkHttpClient
 
-// 2) Add the interceptor to each business OkHttpClient factory (one line)
+// Initialize once during Application startup.
+MockNetPack.initialize(applicationContext)
+MockNetPack.start()
+
+// Add an application interceptor to each business OkHttpClient factory
+// whose traffic should be captured.
 val client = OkHttpClient.Builder()
     .addInterceptor(MockNetPack.interceptor())
     .build()
+```
 
-// 3) Scan the pairing QR code (shows the server-side "Pair device" QR, e.g. from
-//    the Web management UI): the SDK probes the server, registers the device
-//    with the pairing token, persists the server address, and starts connecting.
-MockNetPack.connectByScan(activity) { result ->
+Without a saved address, `start()` enters `UNCONFIGURED` without contacting the server. If the host has a stable device ID, use `start(did = businessDeviceID)`. Otherwise, the SDK generates and persists an app-scoped did.
+
+Launch QR pairing from an Activity's debug entry point:
+
+```kotlin
+import com.mocknetpack.android.ConnectByScanResult
+import com.mocknetpack.android.MockNetPack
+
+MockNetPack.connectByScan(this) { result ->
     when (result) {
-        is ConnectByScanResult.Success -> // connected; address saved
-        is ConnectByScanResult.Failure -> // see ConnectByScanError for classification
+        ConnectByScanResult.Success -> {
+            // Address saved and connection started; no additional start() needed.
+        }
+        is ConnectByScanResult.Failure -> {
+            // Handle result.error: cancellation, permission denial,
+            // app mismatch, expired token, or other pairing errors.
+        }
     }
 }
-
-// 4) Start (no-arg): reads the persisted server address + device ID and connects.
-//    Before the first scan this enters UNCONFIGURED state (no network, waits for scan).
-MockNetPack.start()
 ```
 
-- First-time onboarding: scan once → `connectByScan` succeeds → address persisted → `start()` reconnects automatically on every launch (no re-scan).
-- To point the SDK at a different server, scan again (a failed scan never overwrites a saved address).
+The server address comes from the pairing QR code, so business code does not need a hard-coded address. Call `start()` on later launches to reconnect. Scan again to change servers; a failed scan does not overwrite the saved address. Callbacks run on the main thread. Avoid launching overlapping scan flows.
 
-### Server repository
+## Server pairing and capture
 
-The MockNetPack central server (Go) lives at: **https://github.com/cx-z/MockNetPackageServer.git**
+Server repository: [MockNetPackageServer](https://github.com/cx-z/MockNetPackageServer).
 
-It provides the HTTP endpoints the SDK talks to (`/api/v1/devices/register`, `/heartbeat`, `/traffic`, `/mock-rules`, pairing tokens), the Web management UI, and the Android pairing QR codes. See its README for server setup and the Web UI.
+`server_address` represents the deployed server's DNS name or IP address. The Web console is `http://server_address:4290/mocknetpack/`; the SDK API base URL is `http://server_address:4290/api/v1`. Use the actual external scheme and ports if your deployment exposes different URLs. The local project checkout is for development and testing.
 
-## Release isolation (Debug-only, SDK–integrator decoupling)
+1. Add the host's actual applicationId to the server's app catalog.
+2. Sign in to the Web console, select the app, and generate a pairing QR code. Tokens expire after 10 minutes by default.
+3. Scan from the app. The device is registered or reused under the pairing account, and the SDK saves the address and starts heartbeats.
+4. Activate a capture session in the Web console. Capture and mock execution start only while the session is active.
+5. Create and enable a rule from traffic or manually. The SDK refreshes its local snapshot when the rules version changes.
 
-The requirement on the integrator is: **the Release artifact must not contain this SDK's code/symbols** (must be "not carried", not merely "not active"). The SDK itself does not self-inspect; the guarantee comes from the integrating app's build layer:
+Rules are isolated by `(App, did)` and match **method + URL path**, ignoring the host, query string, and request body. Unmatched requests reach the real server. A synchronization failure retains the existing rule snapshot; control-channel failures do not directly become business request errors.
 
-1. SDK is pulled in via `debugImplementation` only (zero references in the Release dependency graph);
-2. all SDK call sites live in the `debug` source set (`src/debug/...`), so `main` code compiles without the SDK;
-3. CI verifies the Release APK dex contains no `com.mocknetpack.android.*` symbols (e.g. `dexdump` grep = 0 hits) and blocks the release otherwise.
+## Permissions and network access
 
-## Platform differences (vs iOS)
+The SDK Manifest declares `INTERNET`, `CAMERA`, and an internal scanner Activity. They merge into host variants that include the SDK. The scanner requests camera permission at runtime; denial returns `CAMERA_DENIED`.
 
-| Item | iOS (MockNetPackKit) | Android (this SDK) |
-|---|---|---|
-| Capture mechanism | URLProtocol global registration + swizzle (zero business changes) | OkHttp application interceptor (one line per OkHttpClient factory) |
-| Persistence | UserDefaults | SharedPreferences (requires `MockNetPack.initialize(context)`) |
-| QR scan | AVCaptureSession | CameraX + ML Kit (bundled, no Play Services) |
-| Concurrency/callbacks | GCD serial queue + main dispatch | coroutine single-thread dispatcher + Main dispatcher |
-| gzip | zlib deflateInit2(MAX_WBITS+16) | java.util.zip.GZIPOutputStream (standard gzip) |
-| System info | Bundle ID / UIDevice | applicationId / Build.VERSION |
+The phone must be able to reach the deployed server address in the QR code. For HTTP endpoints, allow the appropriate cleartext destinations through the host's debug Manifest / Network Security Config. Test camera and server connectivity on a device; JVM unit tests do not cover these system interactions.
 
-## Repository structure
+## State and controls
 
-```
-MockNetPackAndroid/
-├── jitpack.yml               # JitPack build config (JDK 17)
-├── mocknetpack/              # SDK library module (com.mocknetpack.android)
-│   ├── build.gradle.kts
-│   └── src/
-│       ├── main/java/com/mocknetpack/android/
-│       │   ├── MockNetPack.kt            # facade (initialize/interceptor/start/connectByScan/codec)
-│       │   ├── Models.kt                 # contract models
-│       │   └── internal/
-│       │       ├── connection/           # ConnectionController / ConnectionClient
-│       │       ├── capture/              # TrafficCaptureController / MockNetPackInterceptor
-│       │       ├── mock/                 # MockRuleController
-│       │       ├── codec/                # BinaryCodec (gzip)
-│       │       ├── store/                # DIDStore / ServerAddressStore
-│       │       ├── scan/                 # QRConnectParser / QRScannerActivity / ConnectByScanFlow
-│       │       └── log/                  # SDKLogger
-│       └── test/java/...                 # local unit tests
-```
+| API | Purpose |
+|---|---|
+| `initialize(context)` | Supply ApplicationContext before other SDK operations |
+| `interceptor()` | Supply an application interceptor for business OkHttpClient instances |
+| `start(did)` / `stop()` | Start or stop the connection; stopping preserves did and the saved address |
+| `did` / `savedServerURL` | Inspect the device ID and saved address |
+| `connectionState` | `UNCONFIGURED` / `CONNECTING` / `CONNECTED` / `OFFLINE` / `TOKEN_INVALID` |
+| `sessionState` | `IDLE` / `CAPTURING` |
+| `onConnectionStateChange` / `onSessionStateChange` | State callbacks on the main thread |
+| `resetServer()` | Clear the saved address without stopping the current connection |
+| `registerBinaryCodec(...)` | Display and mock-replay codecs for private binary protocols |
 
-## Local build & test
+To return to an unconfigured state, call `stop()`, `resetServer()`, then `start()`. Pair again after the server-side device is deleted.
+
+## Capture and replay boundaries
+
+- Version 1.0.1 records `networkResponse.request` when available, falling back to `response.request`. This represents the request associated with the final response, rather than a byte-level network trace or a complete redirect history.
+- Response bodies are captured through a tee while business code reads them, with a 1 MiB recording buffer. Recording completes on EOF / close, so callers must consume or close response bodies. Recorded request bodies also have a 1 MiB limit.
+- Uploads are asynchronous batches. Failed batches are dropped without retry. SDK requests are excluded from recursive capture.
+- Binary replay uses original `bodyBase64` bytes, then edited text encoded by a codec, then UTF-8 text. `BinaryCompression.GZIP` compresses before encryption; the host supplies decryption and corresponding decompression.
+- Supply `requestDecrypt` and `responseDecrypt` separately when needed. Without a request decoder, the SDK does not use the response decoder as a substitute.
+
+## Release isolation
+
+The SDK does not inspect the host build type or decide Debug/Release integration. **Release APK/AAB artifacts must not contain SDK code or symbols**:
+
+- Use `debugImplementation` and place SDK calls in `src/debug/...`. Provide a Release implementation of shared business entry points without an SDK dependency.
+- Do not reference the SDK directly from `src/main/...`. A `BuildConfig.DEBUG` condition does not replace dependency and source-set isolation.
+- Host CI should check the Release dependency graph and final APK/AAB for `com.mocknetpack.android.*` symbols. Manage debug-specific network and permission configuration by variant as well.
+
+The SDK's publication task uses a library variant named `release`. This does not mean the host's Release build should include the SDK.
+
+## Repository and local testing
+
+Implementation lives in `mocknetpack/src/main/java/com/mocknetpack/android/`. The facade is `MockNetPack.kt` and models are in `Models.kt`. Internal code is organized into connection / capture / mock / codec / store / scan / log modules.
+
+Run from the SDK repository root with JDK 17 and the Android SDK available:
 
 ```bash
-cd MockNetPackAndroid
-./gradlew :mocknetpack:assembleDebug      # build the SDK AAR
-./gradlew :mocknetpack:testDebugUnitTest  # run unit tests
+./gradlew :mocknetpack:assembleDebug
+./gradlew :mocknetpack:testDebugUnitTest
 ```
 
-> On macOS, prefix Gradle commands with `JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"` (a plain `java` from the shell is unavailable).
+On macOS, you can set `JAVA_HOME` to Android Studio's bundled JDK, for example `/Applications/Android Studio.app/Contents/jbr/Contents/Home`; use your actual installation path. Verify camera pairing, business network capture, deployed-server session integration, and Release isolation in the host project.

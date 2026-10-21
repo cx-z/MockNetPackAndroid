@@ -189,6 +189,8 @@ internal data class MockResponse(
     val bodyBase64: String? = null,
     /// 命中该回包的规则 ID（match 时填充，随命中流量上报 matchedRuleId）。
     val ruleId: String? = null,
+    /** Mock 回包延迟毫秒数。null/0 = 立即回包。 */
+    val delayMs: Int? = null,
 )
 
 /// 一条设备级 Mock 规则（契约 MockRule）。SDK 只关心匹配与回包字段。

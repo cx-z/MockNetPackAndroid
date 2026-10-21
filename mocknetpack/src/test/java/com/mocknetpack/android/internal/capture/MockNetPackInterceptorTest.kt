@@ -316,6 +316,49 @@ class MockNetPackInterceptorTest {
     }
 
     @Test
+    fun `mock hit with delayMs sleeps before serving response`() {
+        MockRuleController.reset()
+        MockRuleController.applyForTesting(
+            listOf(
+                MockRule(
+                    id = "r-delay",
+                    method = "GET",
+                    path = "/api/v1/slow",
+                    response = SdkMockResponse(
+                        statusCode = 200,
+                        headers = mapOf("Content-Type" to "application/json"),
+                        body = """{"slow":true}""",
+                        delayMs = 150,
+                    ),
+                    enabled = true,
+                    effective = true,
+                ),
+            ),
+            version = 1,
+        )
+        TrafficCaptureController.start(baseURL(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+
+        val req = Request.Builder().url(server.url("/api/v1/slow")).get().build()
+        val started = System.currentTimeMillis()
+        val body = client.newCall(req).execute().use { resp ->
+            assertEquals(200, resp.code())
+            resp.body()?.string()
+        }
+        val elapsedMs = System.currentTimeMillis() - started
+        assertEquals("""{"slow":true}""", body)
+        // 150ms 延迟 + 调度裕量；无延迟的 mock 命中应远小于此阈值。
+        assertTrue("expected delay, elapsed=${elapsedMs}ms", elapsedMs >= 120)
+
+        TrafficCaptureController.flush()
+        waitUntil { countRequests("/traffic") >= 1 }
+        val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
+        assertEquals(true, entry.optBoolean("mocked"))
+        // sleep 时长计入 durationMs。
+        assertTrue(entry.optInt("durationMs") >= 120)
+    }
+
+    @Test
     fun `mock bodyBase64 raw bytes replay wins over placeholder text`() {
         MockRuleController.reset()
         val b64 = java.util.Base64.getEncoder().encodeToString(byteArrayOf(0x01, 0x02, 0x03, 0x7f))

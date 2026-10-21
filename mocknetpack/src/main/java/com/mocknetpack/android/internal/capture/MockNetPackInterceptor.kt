@@ -146,6 +146,18 @@ class MockNetPackInterceptor : Interceptor {
         requestBodyBytes: ByteArray,
         startNs: Long,
     ): Response {
+        // 时间戳必须在 sleep 之前捕获——否则延迟 N 秒后记录的 timestamp 比请求发起时间晚 N 秒，
+        // 破坏"请求发起时间"的语义（对齐 iOS startTime）。durationMs 仍由 startNs 计算，包含延迟。
+        val timestamp = TrafficCaptureController.rfc3339()
+        val delay = mock.delayMs ?: 0
+        if (delay > 0) {
+            try {
+                Thread.sleep(delay.toLong())
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                // 中断时直接返回，不再延迟（走下面的组装逻辑）
+            }
+        }
         var headerFields = LinkedHashMap(mock.headers ?: emptyMap())
         if (!headerFields.containsKey("Content-Type")) {
             headerFields["Content-Type"] = "application/json"
@@ -184,6 +196,7 @@ class MockNetPackInterceptor : Interceptor {
                 responseHeaders = filtered,
                 bodyBytes = bodyBytes,
                 startNs = startNs,
+                timestamp = timestamp,
             ),
         )
 
@@ -207,11 +220,12 @@ class MockNetPackInterceptor : Interceptor {
         responseHeaders: Map<String, String>,
         bodyBytes: ByteArray,
         startNs: Long,
+        timestamp: String,
     ): TrafficEntry {
         val durationMs = ((System.nanoTime() - startNs) / 1_000_000).toInt().coerceAtLeast(0)
         val reqParts = bodyParts(requestBodyBytes, requestBodyBytes.size.toLong())
         return TrafficEntry(
-            timestamp = TrafficCaptureController.rfc3339(),
+            timestamp = timestamp,
             method = original.method(),
             url = original.url().toString(),
             path = original.url().encodedPath(),

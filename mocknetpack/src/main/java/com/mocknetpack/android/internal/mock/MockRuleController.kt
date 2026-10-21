@@ -134,6 +134,8 @@ object MockRuleController {
             headers = headers,
             body = json.optString("body").takeIf { !json.isNull("body") },
             bodyBase64 = json.optString("bodyBase64").takeIf { !json.isNull("bodyBase64") },
+            // 服务端 omitempty：仅 delayMs>0 时下发；缺 key/0/null 一律视为无延迟。
+            delayMs = json.optInt("delayMs").takeIf { json.has("delayMs") && !json.isNull("delayMs") && it > 0 },
         )
     }
 }

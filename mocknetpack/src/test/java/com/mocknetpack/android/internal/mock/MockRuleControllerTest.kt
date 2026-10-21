@@ -247,4 +247,52 @@ class MockRuleControllerTest {
         assertEquals(b64, list.rules[0].response.bodyBase64)
         assertEquals("[binary 4 bytes]", list.rules[0].response.body)
     }
+
+    @Test
+    fun `parseRuleList decodes delayMs and treats missing as null`() {
+        val withDelay = JSONObject()
+            .put("id", "rd")
+            .put("method", "GET")
+            .put("path", "/v1/d")
+            .put("response", JSONObject()
+                .put("statusCode", 200)
+                .put("body", "{}")
+                .put("delayMs", 1500))
+            .put("enabled", true)
+            .put("effective", true)
+        val withoutDelay = JSONObject()
+            .put("id", "rn")
+            .put("method", "GET")
+            .put("path", "/v1/n")
+            .put("response", JSONObject().put("statusCode", 200).put("body", "{}"))
+            .put("enabled", true)
+            .put("effective", true)
+        val list = MockRuleController.parseRuleList(
+            JSONObject().put("version", 1).put("rules", JSONArray().put(withDelay).put(withoutDelay)),
+        )
+        assertEquals(1500, list.rules[0].response.delayMs)
+        assertNull(list.rules[1].response.delayMs)
+    }
+
+    @Test
+    fun `parseRuleList treats explicit 0 and null delayMs as null`() {
+        val zero = JSONObject()
+            .put("id", "r0")
+            .put("method", "GET")
+            .put("path", "/v1/zero")
+            .put("response", JSONObject().put("statusCode", 200).put("body", "{}").put("delayMs", 0))
+            .put("enabled", true).put("effective", true)
+        val nullVal = JSONObject()
+            .put("id", "rn")
+            .put("method", "GET")
+            .put("path", "/v1/null")
+            .put("response", JSONObject().put("statusCode", 200).put("body", "{}").put("delayMs", JSONObject.NULL))
+            .put("enabled", true).put("effective", true)
+        val list = MockRuleController.parseRuleList(
+            JSONObject().put("version", 1).put("rules", JSONArray().put(zero).put(nullVal)),
+        )
+        // 显式 0 / null 都归一为 null（与 omitempty 语义对齐：0 = 无延迟）
+        assertNull(list.rules[0].response.delayMs)
+        assertNull(list.rules[1].response.delayMs)
+    }
 }

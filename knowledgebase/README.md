@@ -1,10 +1,7 @@
 # MockNetPackAndroid Knowledge Base
 
-本目录为安卓 SDK 的金字塔式知识库（对齐 AI_KB.md 的约定）：
+This directory is reserved for the Android SDK's layered knowledge base. The SDK already includes connection management, OkHttp capture and mocking, binary codecs, and QR pairing.
 
-- `overview.md`（L1）—— 产品形态、关键概念、集成面
-- `architecture.md`（L2）—— 模块划分与数据流
-- `code-map.md`（L3）—— 文件/类级索引
+The planned `overview.md`, `architecture.md`, and `code-map.md` documents are not yet present. See the [SDK README](../README.md) for integration, functional boundaries, and validation commands. The public API is defined in `mocknetpack/src/main/java/com/mocknetpack/android/MockNetPack.kt`.
 
-当前处于 AN-0 骨架阶段：技术方案见 `../../tasks/安卓SDK技术方案.md`，
-知识库三件套随各里程碑实现后补齐（与 iOS `MockNetPackKit/knowledgebase/` 对齐）。
+Additional design documents live in the enclosing platform workspace's `tasks/` directory and are not distributed with this standalone SDK repository.
