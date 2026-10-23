@@ -23,12 +23,12 @@ import okio.Okio
  * OkHttp 应用拦截器（iOS MockNetPackURLProtocol 的安卓等价物）。
  *
  * 工作机制：
- * - 由宿主在其 OkHttpClient.Builder 上 addInterceptor 注入；会话未激活时
- *   `isCapturing=false` → 直接放行（fail-open，业务零干预）。
- * - 拦截判定（canInit 等价）：capturing && http(s) && 非 skipHeader。
- * - 命中本地 Mock 快照 → 合成 Response 直接回（AN-3 实现 serve 分支）；
- *   未命中 → chain.proceed() 转发真实网络，响应体 tee 采集，完成后组装
- *   TrafficEntry 攒批上传。
+ * - 由宿主在其 OkHttpClient.Builder 上 addInterceptor 注入；门闩未接管
+ *   （idle：capturing=false 且非启动缓冲）→ 直接放行（fail-open，业务零干预）。
+ * - 拦截判定（canInit 等价）：接管期（capturing 或 启动缓冲）&& http(s) && 非 skipHeader。
+ * - 命中本地 Mock 快照 → 合成 Response 直接回（AN-3 serve 分支 + AN-9 启动期
+ *   用磁盘快照匹配）；未命中 → chain.proceed() 转发真实网络，响应体 tee 采集，
+ *   完成后组装 TrafficEntry 攒批上传。
  * - SDK 自身请求（注册/心跳/上传）带 `X-MockNetPack-Skip`，直接放行。
  * - 线程安全：OkHttp 保证同一 Interceptor 实例的并发调用安全；内部状态
  *   读写经 TrafficCaptureController/MockRuleController 加锁。
@@ -44,8 +44,10 @@ import okio.Okio
 class MockNetPackInterceptor : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
-        // 1) canInit 等价：capturing && http(s) && 非 skipHeader。
-        if (!TrafficCaptureController.isCapturing) return chain.proceed(chain.request())
+        // 1) canInit 等价：可接管（有效会话 或 启动暂存期）。请求创建时快照采集代次，
+        //    记录与迟到回包归属均使用该代次（对齐 iOS URLProtocol.init 快照 generation）。
+        val generation = TrafficCaptureController.httpCaptureGeneration
+            ?: return chain.proceed(chain.request())
         val original = chain.request()
         val scheme = original.url().scheme()
         if (scheme != "http" && scheme != "https") return chain.proceed(original)
@@ -55,10 +57,13 @@ class MockNetPackInterceptor : Interceptor {
         val startNs = System.nanoTime()
         val requestBodySnapshot = snapshotRequestBody(original)
 
-        // 3) AN-3: Mock 匹配优先（命中 → serve 合成回包，不访问真实网络）。
+        // 3) AN-9: Mock 匹配优先（命中 → serve 合成回包，不访问真实网络）。
+        //    门闩接管期（capturing 或 启动缓冲）均匹配——启动握手期用上次同步的
+        //    磁盘快照即可命中（AN-9 快照持久化）；快照为空（从未同步 / 断连保护
+        //    已清空）→ match 返回 null → 走真实网络（fail-open A）。
         val mock = MockRuleController.match(original.method(), original.url().encodedPath())
         if (mock != null) {
-            return serve(mock, original, requestBodySnapshot, startNs)
+            return serve(mock, original, requestBodySnapshot, startNs, generation)
         }
 
         // 转发：重建 body（快照字节）并去掉 SDK 跳过标记（不发给真实服务器）。
@@ -92,7 +97,7 @@ class MockNetPackInterceptor : Interceptor {
                 error = e.message ?: e.javaClass.simpleName,
                 contentType = original.body()?.contentType()?.toString(),
             )
-            TrafficCaptureController.record(entry)
+            TrafficCaptureController.record(entry, generation)
             throw e
         }
 
@@ -130,6 +135,7 @@ class MockNetPackInterceptor : Interceptor {
                     error = null,
                     contentType = bodyContentType,
                 ),
+                generation,
             )
         }
         return response.newBuilder().body(tee).build()
@@ -145,6 +151,7 @@ class MockNetPackInterceptor : Interceptor {
         original: Request,
         requestBodyBytes: ByteArray,
         startNs: Long,
+        generation: Long,
     ): Response {
         // 时间戳必须在 sleep 之前捕获——否则延迟 N 秒后记录的 timestamp 比请求发起时间晚 N 秒，
         // 破坏"请求发起时间"的语义（对齐 iOS startTime）。durationMs 仍由 startNs 计算，包含延迟。
@@ -198,6 +205,7 @@ class MockNetPackInterceptor : Interceptor {
                 startNs = startNs,
                 timestamp = timestamp,
             ),
+            generation,
         )
 
         return Response.Builder()

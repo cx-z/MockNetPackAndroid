@@ -295,4 +295,113 @@ class MockRuleControllerTest {
         assertNull(list.rules[0].response.delayMs)
         assertNull(list.rules[1].response.delayMs)
     }
+
+    // MARK: - AN-9 快照序列化 roundtrip
+
+    @Test
+    fun `rule snapshot serialization roundtrips`() {
+        val rules = listOf(
+            MockRule(
+                id = "r1",
+                method = "POST",
+                path = "/api/v1/business",
+                response = MockResponse(
+                    statusCode = 503,
+                    headers = mapOf("Content-Type" to "application/json", "X-Mock" to "1"),
+                    body = "old",
+                    bodyBase64 = null,
+                    delayMs = 250,
+                ),
+                enabled = true,
+                effective = true,
+            ),
+            MockRule(
+                id = "r2",
+                method = "GET",
+                path = "/x/y",
+                response = MockResponse(
+                    statusCode = 200,
+                    headers = null,
+                    body = null,
+                    bodyBase64 = "aGVsbG8=",
+                    delayMs = null,
+                ),
+                enabled = false,
+                effective = false,
+            ),
+        )
+
+        // 序列化 → 包一层 version → 反序列化
+        val json = JSONObject()
+            .put("version", 7)
+            .put("rules", MockRuleController.rulesToJsonArray(rules))
+        val list = MockRuleController.parseRuleList(json)
+
+        assertEquals(7, list.version)
+        assertEquals(2, list.rules.size)
+
+        val r1 = list.rules[0]
+        assertEquals("r1", r1.id)
+        assertEquals("POST", r1.method)
+        assertEquals("/api/v1/business", r1.path)
+        assertEquals(true, r1.enabled)
+        assertEquals(true, r1.effective)
+        assertEquals(503, r1.response.statusCode)
+        assertEquals(mapOf("Content-Type" to "application/json", "X-Mock" to "1"), r1.response.headers)
+        assertEquals("old", r1.response.body)
+        assertNull(r1.response.bodyBase64)
+        assertEquals(250, r1.response.delayMs)
+        assertNull("ruleId 不落盘", r1.response.ruleId)
+
+        val r2 = list.rules[1]
+        assertEquals("r2", r2.id)
+        assertEquals(false, r2.enabled)
+        assertEquals(false, r2.effective)
+        assertEquals("aGVsbG8=", r2.response.bodyBase64)
+        assertNull(r2.response.body)
+        assertNull(r2.response.delayMs)
+    }
+
+    /// F2 并发防护（B 会话复核 F2）：match / clearSnapshot / applyForTesting 并发
+    /// （含 ensureLoaded 首次加载竞态）不抛异常、不返回越界规则。ensureLoaded
+    /// 的构造→加载→解析→赋值与 clearSnapshot 同锁互斥，压力测试暴露撕裂/复活。
+    @Test
+    fun `concurrent match and clear does not tear or crash`() {
+        val ruleA = mockRule("A", "GET", "/a")
+        val errors = CopyOnWriteArrayList<Throwable>()
+        val threads = mutableListOf<Thread>()
+        // 写线程：交替写入规则 A / 清空快照。
+        threads += Thread {
+            try {
+                repeat(200) { i ->
+                    if (i % 2 == 0) {
+                        MockRuleController.applyForTesting(listOf(ruleA), version = i + 1)
+                    } else {
+                        MockRuleController.clearSnapshot()
+                    }
+                }
+            } catch (t: Throwable) {
+                errors += t
+            }
+        }
+        // 读线程：match 不抛异常；命中时规则 id 必须等于当前写入的 A。
+        repeat(3) {
+            threads += Thread {
+                try {
+                    repeat(2000) {
+                        val m = MockRuleController.match("GET", "/a")
+                        if (m != null) assertEquals("A", m.ruleId)
+                    }
+                } catch (t: Throwable) {
+                    errors += t
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+        assertTrue(
+            "并发下不应有异常或越界规则: ${errors.joinToString { it.message ?: it.toString() }}",
+            errors.isEmpty(),
+        )
+    }
 }

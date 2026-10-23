@@ -51,6 +51,10 @@ class ConnectionController internal constructor() {
         internal const val HEARTBEAT_MAX_SECONDS = 300
         /// 退避上限（秒）。
         internal const val BACKOFF_MAX_SECONDS = 30
+        /// AN-9 断连保护：register 网络失败达该次数即清空本地 Mock 快照
+        /// （内存+磁盘）；连接恢复后以 sinceVersion=0 重新下载。用户决策：
+        /// 失败第 2 次即清空、旧快照不恢复。
+        internal const val REGISTER_FAIL_LIMIT = 2
 
         /// 默认串行调度器：单线程 IO dispatcher（连接循环同刻至多一个在途）。
         @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -95,6 +99,9 @@ class ConnectionController internal constructor() {
     private var registered = false
     /// 设备未在 Web 注册（register/heartbeat 404）→ 静默停循环，不再重试。
     private var unregistered = false
+    /// AN-9 断连保护：本次启动周期内 register 网络失败计数（start 时重置；
+    /// 达到 REGISTER_FAIL_LIMIT 即清空本地 Mock 快照）。
+    private var registerFailCount = 0
     private var currentBackoff = 1.0
     private var inflight = false
 
@@ -151,6 +158,7 @@ class ConnectionController internal constructor() {
             serverConfig = ServerConfig(heartbeatIntervalSeconds = 5, heartbeatTimeoutSeconds = 60)
             registered = false
             unregistered = false
+            registerFailCount = 0
             currentBackoff = backoffBaseSeconds
             pairingTokenValue = pairingToken
             deviceNameValue = deviceName
@@ -158,9 +166,8 @@ class ConnectionController internal constructor() {
         }
 
         log("MockNetPack connecting to $server app=${appID ?: "?"} did=${did ?: "?"}")
-        setConnectionState(ConnectionState.CONNECTING)
-        scheduleNext(now = true)
-        // 启动流量采集（会话未激活时不拦截；Android 拦截器已由宿主注入）。
+        // 必须先启动采集并开启启动暂存，再调度任何异步注册/心跳——否则首个心跳
+        // 前的业务请求（capturing 未确认）会 fail-open 漏抓（对齐 iOS「先装暂存再调度握手」）。
         val resolvedDid = synchronized(lock) { didValue }
         TrafficCaptureController.start(
             serverURL = server,
@@ -168,6 +175,8 @@ class ConnectionController internal constructor() {
             did = resolvedDid ?: "",
             logHandler = logHandler,
         )
+        setConnectionState(ConnectionState.CONNECTING)
+        scheduleNext(now = true)
     }
 
     /// 无服务器启动：仅解析 did 并置 UNCONFIGURED，不发起网络。
@@ -284,11 +293,19 @@ class ConnectionController internal constructor() {
         }
 
         val client = makeClient(serverURL)
+        // 发握手请求前绑定 HTTP 采集代次；永久拒绝只能取消该代启动暂存（对齐 iOS performCycle）。
+        val captureGeneration = TrafficCaptureController.httpCaptureGeneration
 
         // 1) 需要注册：未注册过（或上次心跳 404 置为未注册）。
         val needRegister = synchronized(lock) { !registered }
         if (needRegister) {
-            performRegister(client = client, appID = appID, did = did, gen = gen)
+            performRegister(
+                client = client,
+                appID = appID,
+                did = did,
+                gen = gen,
+                captureGeneration = captureGeneration,
+            )
             return // performRegister 内已调度下一轮
         }
 
@@ -304,6 +321,11 @@ class ConnectionController internal constructor() {
                 currentBackoff = backoffBaseSeconds
                 registered = true
                 resp.serverConfig?.let { serverConfig = it }
+                // AN-9 连续失败语义（用户决策 2026-10-23）：任意一次成功握手
+                // （register 成功 / heartbeat 成功）即重置断连保护计数——只有
+                // 「连续」失败 2 次才清空快照，避免网络抖动（失败夹成功）误清；
+                // 多段断连各自独立保护（第 2 段断连同样在第 2 次连续失败时清空）。
+                registerFailCount = 0
             }
             setConnectionState(ConnectionState.CONNECTED)
             // 先驱动流量采集启停，再广播会话状态——外部 onSessionStateChange 回调可能
@@ -331,11 +353,19 @@ class ConnectionController internal constructor() {
                     unregistered = true
                 }
                 setConnectionState(ConnectionState.OFFLINE)
+                // 永久拒绝：丢弃本次启动的暂存，不污染后续手动激活会话（对齐 iOS）；
+                // AN-9：设备未注册 → 本地 Mock 快照无意义，立即清空（内存+磁盘）。
+                TrafficCaptureController.cancelStartupCapture(captureGeneration)
+                MockRuleController.clearSnapshot()
                 log("heartbeat 404: device not registered; SDK idle (re-register in Web and restart App)")
                 finishCycle(gen)
                 // 不 scheduleNext。
             } else {
                 // 网络错误 / 5xx / 解码失败 → 指数退避重连。
+                // AN-9 断连保护：heartbeat 网络失败同样计数（方案 §3.5「register/
+                // heartbeat 网络失败计数」），达阈值清空本地 Mock 快照——设备离开
+                // 内网后无法连接服务器时，旧快照不会无限期控制 App 行为。
+                countRegisterFailure()
                 val backoff = advanceBackoff()
                 setConnectionState(ConnectionState.OFFLINE)
                 log("heartbeat failed: ${e.message}; retrying in ${backoff.toInt()}s")
@@ -350,7 +380,13 @@ class ConnectionController internal constructor() {
 
     // MARK: - 注册
 
-    private suspend fun performRegister(client: ConnectionClient, appID: String, did: String, gen: Int) {
+    private suspend fun performRegister(
+        client: ConnectionClient,
+        appID: String,
+        did: String,
+        gen: Int,
+        captureGeneration: Long?,
+    ) {
         val meta = synchronized(lock) {
             RegisterDeviceRequest(
                 app = appID,
@@ -374,6 +410,7 @@ class ConnectionController internal constructor() {
             synchronized(lock) {
                 registered = true
                 serverConfig = resp.serverConfig
+                registerFailCount = 0 // 注册成功：重置 AN-9 断连保护计数
             }
             log("registered app=$appID did=$did")
             setConnectionState(ConnectionState.CONNECTED)
@@ -393,6 +430,10 @@ class ConnectionController internal constructor() {
                     unregistered = true
                 }
                 setConnectionState(ConnectionState.OFFLINE)
+                // 永久拒绝：丢弃本次启动的暂存，不污染后续手动激活会话（对齐 iOS）；
+                // AN-9：设备未注册 → 本地 Mock 快照无意义，立即清空（内存+磁盘）。
+                TrafficCaptureController.cancelStartupCapture(captureGeneration)
+                MockRuleController.clearSnapshot()
                 log("register 404: device not registered on server; SDK idle (register the device in Web)")
                 finishCycle(gen)
                 // 不 scheduleNext。
@@ -408,22 +449,29 @@ class ConnectionController internal constructor() {
                         unregistered = true
                     }
                     setConnectionState(ConnectionState.TOKEN_INVALID)
+                    // 永久拒绝：丢弃本次启动的暂存（对齐 iOS）；AN-9：令牌失效
+                    // → 本地 Mock 快照无意义，立即清空（内存+磁盘）。
+                    TrafficCaptureController.cancelStartupCapture(captureGeneration)
+                    MockRuleController.clearSnapshot()
                     log("register 403: pairing token invalid or expired; SDK idle (re-scan a fresh QR)")
                     finishCycle(gen)
                     return // 不 scheduleNext。
                 }
+                countRegisterFailure()
                 val backoff = advanceBackoff()
                 setConnectionState(ConnectionState.OFFLINE)
                 log("register httpStatus=403; retrying in ${backoff.toInt()}s")
                 finishCycle(gen)
                 scheduleNext(delaySeconds = backoff)
             } else if (e is ConnectionClientError.HttpStatus) {
+                countRegisterFailure()
                 val backoff = advanceBackoff()
                 setConnectionState(ConnectionState.OFFLINE)
                 log("register httpStatus=${e.code}; retrying in ${backoff.toInt()}s")
                 finishCycle(gen)
                 scheduleNext(delaySeconds = backoff)
             } else {
+                countRegisterFailure()
                 val backoff = advanceBackoff()
                 setConnectionState(ConnectionState.OFFLINE)
                 log("register failed: ${e.message}; retrying in ${backoff.toInt()}s")
@@ -438,8 +486,25 @@ class ConnectionController internal constructor() {
 
     // MARK: - 心跳
 
-    private suspend fun heartbeat(client: ConnectionClient, appID: String, did: String): HeartbeatResponse {
-        val sdk = synchronized(lock) { sdkVersionValue }
+    /// AN-9 断连保护：register/heartbeat **连续**网络失败计数（用户决策
+    /// 2026-10-23：连续失败 2 次清空，而非启动周期内累计——任意成功握手即
+    /// 重置，见 start()/register 成功/heartbeat 成功三处）。达到
+    /// REGISTER_FAIL_LIMIT（第 2 次连续失败）即清空本地 Mock 快照（内存+磁盘）
+    /// ——此后启动缓冲期不再用旧快照 Mock；连接恢复后以 sinceVersion=0 重新
+    /// 从服务端下载（用户决策：旧快照不恢复）。
+    /// 仅首次达到阈值时清快照并打日志（后续失败不再重复无操作清空）。
+    private fun countRegisterFailure() {
+        val reached = synchronized(lock) {
+            registerFailCount += 1
+            registerFailCount == REGISTER_FAIL_LIMIT
+        }
+        if (reached) {
+            MockRuleController.clearSnapshot()
+            log("connection failed $registerFailCount times; cleared local mock snapshot (re-download on reconnect)")
+        }
+    }
+
+    private suspend fun heartbeat(client: ConnectionClient, appID: String, did: String): HeartbeatResponse {        val sdk = synchronized(lock) { sdkVersionValue }
         val respJson = client.post(
             "devices/$appID/$did/heartbeat",
             JSONObject().put("sdkVersion", sdk),

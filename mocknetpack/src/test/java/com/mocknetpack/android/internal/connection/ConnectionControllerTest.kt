@@ -1,7 +1,10 @@
 package com.mocknetpack.android.internal.connection
 
 import com.mocknetpack.android.ConnectionState
+import com.mocknetpack.android.MockResponse as SdkMockResponse
+import com.mocknetpack.android.MockRule
 import com.mocknetpack.android.SessionState
+import com.mocknetpack.android.internal.mock.MockRuleController
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +20,8 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -56,6 +61,7 @@ class ConnectionControllerTest {
     fun tearDown() {
         controller.stop()
         server.shutdown()
+        MockRuleController.reset() // 全局 object：清内存快照防污染其他用例
         Dispatchers.resetMain()
     }
 
@@ -89,12 +95,12 @@ class ConnectionControllerTest {
         )
     }
 
-    private fun heartbeatResponse(session: String? = null, interval: Int = 3): MockResponse {
+    private fun heartbeatResponse(session: String? = null, interval: Int = 3, rulesVersion: Int = 0): MockResponse {
         val sessionJson = session?.let {
             """{"id":"$it","app":"$appID","did":"$externalDID","status":"capturing","startedAt":"2026-10-08T00:00:00Z","endedAt":null,"requestCount":0,"viewerCount":0}"""
         } ?: "null"
         return MockResponse().setResponseCode(200).setBody(
-            """{"ok":true,"serverTime":"2026-10-08T00:00:00Z","serverConfig":{"heartbeatIntervalSeconds":$interval,"heartbeatTimeoutSeconds":60},"session":$sessionJson,"rulesVersion":0}""",
+            """{"ok":true,"serverTime":"2026-10-08T00:00:00Z","serverConfig":{"heartbeatIntervalSeconds":$interval,"heartbeatTimeoutSeconds":60},"session":$sessionJson,"rulesVersion":$rulesVersion}""",
         )
     }
 
@@ -247,6 +253,236 @@ class ConnectionControllerTest {
 
         waitUntil { controller.connectionState == ConnectionState.OFFLINE && countRequests("/devices/register") >= 2 }
         assertNotEquals(ConnectionState.TOKEN_INVALID, controller.connectionState)
+    }
+
+    // MARK: - AN-9 断连保护（register 失败清空 Mock 快照）
+
+    /// register 网络失败第 1 次快照仍生效；第 2 次清空（内存+磁盘，单测仅内存）；
+    /// 连接恢复后以 sinceVersion=0 重新从服务端下载（旧快照不恢复）。
+    @Test
+    fun `register fails twice clears mock snapshot then reconnect re-downloads`() {
+        MockRuleController.reset()
+        MockRuleController.applyForTesting(
+            listOf(
+                MockRule(
+                    id = "old-rule",
+                    method = "POST",
+                    path = "/old",
+                    response = SdkMockResponse(statusCode = 503, headers = null, body = "old", bodyBase64 = null),
+                    enabled = true,
+                    effective = true,
+                ),
+            ),
+            version = 1,
+        )
+        var registerFails = 2
+        var syncCalls = 0
+        handler = { req ->
+            val p = req.path!!
+            when {
+                p.endsWith("/devices/register") -> {
+                    if (registerFails > 0) {
+                        registerFails--
+                        MockResponse().setResponseCode(500).setBody("""{"error":"boom"}""")
+                    } else registerResponse()
+                }
+                p.endsWith("/heartbeat") -> heartbeatResponse(session = "s1", interval = 3, rulesVersion = 2)
+                p.contains("/mock-rules") -> {
+                    syncCalls++
+                    MockResponse().setResponseCode(200).setBody(
+                        """{"version":2,"rules":[{"id":"new-rule","method":"POST","path":"/new","response":{"statusCode":201,"body":"new"},"enabled":true,"effective":true}]}""",
+                    )
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        startController()
+
+        // 第 1 次失败：快照仍生效（backoff 后重试）。
+        waitUntil { countRequests("/devices/register") >= 1 }
+        assertNotNull("失败第 1 次后旧快照仍生效", MockRuleController.match("POST", "/old"))
+
+        // 第 2 次失败：快照被清空，旧规则不再匹配。
+        waitUntil { countRequests("/devices/register") >= 2 }
+        assertNull("失败第 2 次后旧快照应被清空", MockRuleController.match("POST", "/old"))
+
+        // 连接恢复 → 心跳（rulesVersion=2）→ sinceVersion=0 全量拉取 → 新规则生效。
+        // 轮询 SDK 侧生效（syncCalls 是服务器视角，apply 可能在 handler 返回后稍晚完成）。
+        waitUntil { MockRuleController.match("POST", "/new") != null }
+        val rulePull = recordedRequests.lastOrNull { it.path?.contains("/mock-rules") == true }
+        assertNotNull("恢复后应重新拉取规则", rulePull)
+        assertTrue("应以 sinceVersion=0 全量拉取", rulePull!!.path!!.contains("sinceVersion=0"))
+        assertNull("旧规则不恢复", MockRuleController.match("POST", "/old"))
+    }
+
+    /// AN-9 断连保护（用户决策 2026-10-23：**连续**失败语义——任意成功握手
+    /// 重置计数）：注册成功后设备离开内网 → heartbeat 连续失败——第 1 次快照
+    /// 仍生效，第 2 次清空（内存+磁盘，单测仅内存）；恢复后 sinceVersion=0 重拉。
+    @Test
+    fun `heartbeat fails twice clears mock snapshot then reconnect re-downloads`() {
+        MockRuleController.reset()
+        MockRuleController.applyForTesting(
+            listOf(
+                MockRule(
+                    id = "old-rule",
+                    method = "GET",
+                    path = "/old",
+                    response = SdkMockResponse(statusCode = 503, headers = null, body = "old", bodyBase64 = null),
+                    enabled = true,
+                    effective = true,
+                ),
+            ),
+            version = 1,
+        )
+        var failHeartbeats = 2
+        handler = { req ->
+            val p = req.path!!
+            when {
+                p.endsWith("/devices/register") -> registerResponse()
+                p.endsWith("/heartbeat") -> {
+                    if (failHeartbeats > 0) {
+                        failHeartbeats--
+                        MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)
+                    } else heartbeatResponse(session = "s1", interval = 3, rulesVersion = 2)
+                }
+                p.contains("/mock-rules") -> MockResponse().setResponseCode(200).setBody(
+                    """{"version":2,"rules":[{"id":"new-rule","method":"GET","path":"/new","response":{"statusCode":201,"body":"new"},"enabled":true,"effective":true}]}""",
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        startController()
+
+        // 注册成功后首次 heartbeat 失败：快照仍生效（registerFailCount 注册成功时
+        // 重置为 0，第 1 次失败不达阈值）。
+        waitUntil { countRequests("/heartbeat") >= 1 }
+        assertNotNull("心跳失败第 1 次后旧快照仍生效", MockRuleController.match("GET", "/old"))
+
+        // 心跳失败第 2 次 → 快照清空，旧规则不再匹配。
+        waitUntil { countRequests("/heartbeat") >= 2 }
+        assertNull("心跳失败第 2 次后旧快照应被清空", MockRuleController.match("GET", "/old"))
+
+        // 心跳恢复（rulesVersion=2）→ sinceVersion=0 全量拉取 → 新规则生效。
+        waitUntil { MockRuleController.match("GET", "/new") != null }
+        val rulePull = recordedRequests.lastOrNull { it.path?.contains("/mock-rules") == true }
+        assertNotNull("恢复后应重新拉取规则", rulePull)
+        assertTrue("应以 sinceVersion=0 全量拉取", rulePull!!.path!!.contains("sinceVersion=0"))
+        assertNull("旧规则不恢复", MockRuleController.match("GET", "/old"))
+    }
+
+    /// AN-9 连续失败语义：心跳失败夹成功（网络抖动）不误清——任意成功握手
+    /// 重置计数，单次失败后计数回到 0，永不达阈值。
+    @Test
+    fun `interleaved heartbeat failures with success reset counter without clearing`() {
+        MockRuleController.reset()
+        MockRuleController.applyForTesting(
+            listOf(
+                MockRule(
+                    id = "old-rule",
+                    method = "GET",
+                    path = "/old",
+                    response = SdkMockResponse(statusCode = 503, headers = null, body = "old", bodyBase64 = null),
+                    enabled = true,
+                    effective = true,
+                ),
+            ),
+            version = 1,
+        )
+        // false = 失败（连接断开），true = 成功；交替出现，永不连续两次失败。
+        val hbSeq = booleanArrayOf(false, true, false, true, false, true, false)
+        var hbIdx = 0
+        handler = { req ->
+            val p = req.path!!
+            when {
+                p.endsWith("/devices/register") -> registerResponse()
+                p.endsWith("/heartbeat") -> {
+                    val failed = hbIdx < hbSeq.size && !hbSeq[hbIdx]
+                    hbIdx++
+                    if (failed) {
+                        MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)
+                    } else {
+                        heartbeatResponse(session = "s1", interval = 3, rulesVersion = 1)
+                    }
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        startController()
+
+        // 跑完交替序列（4 失败 + 3 成功），计数每次都被成功重置 → 快照从未清空。
+        waitUntil { countRequests("/heartbeat") >= hbSeq.size }
+        assertNotNull("交替失败/成功不应误清快照", MockRuleController.match("GET", "/old"))
+    }
+
+    /// AN-9 连续失败语义：第 1 段断连清空 → 恢复（成功重置计数）重拉新规则 →
+    /// 第 2 段断连再次连续失败 2 次 → 新快照再次被清（每段断连独立保护）。
+    @Test
+    fun `second disconnect episode clears snapshot again after reconnect`() {
+        MockRuleController.reset()
+        MockRuleController.applyForTesting(
+            listOf(
+                MockRule(
+                    id = "old-rule",
+                    method = "GET",
+                    path = "/old",
+                    response = SdkMockResponse(statusCode = 503, headers = null, body = "old", bodyBase64 = null),
+                    enabled = true,
+                    effective = true,
+                ),
+            ),
+            version = 1,
+        )
+        val failSecond = java.util.concurrent.atomic.AtomicInteger(0)
+        handler = { req ->
+            val p = req.path!!
+            when {
+                p.endsWith("/devices/register") -> registerResponse()
+                p.endsWith("/heartbeat") -> {
+                    if (failSecond.get() > 0) {
+                        failSecond.decrementAndGet()
+                        MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)
+                    } else {
+                        heartbeatResponse(session = "s1", interval = 3, rulesVersion = 2)
+                    }
+                }
+                p.contains("/mock-rules") -> MockResponse().setResponseCode(200).setBody(
+                    """{"version":2,"rules":[{"id":"new-rule","method":"GET","path":"/new","response":{"statusCode":201,"body":"new"},"enabled":true,"effective":true}]}""",
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        startController()
+
+        // 第 1 段：注册成功 → 心跳成功（重置计数）→ 拉取新规则生效。
+        waitUntil { MockRuleController.match("GET", "/new") != null }
+
+        // 第 2 段：手动开启连续 2 次心跳失败 → 新快照再次被清空。
+        failSecond.set(2)
+        waitUntil { MockRuleController.match("GET", "/new") == null }
+        assertNull("第 2 段断连连续失败 2 次后新快照应被清空", MockRuleController.match("GET", "/new"))
+    }
+
+    /// register 404（永久拒绝，设备未注册）→ 立即清空 Mock 快照（不等 2 次）。
+    @Test
+    fun `register 404 clears mock snapshot immediately`() {        MockRuleController.reset()
+        MockRuleController.applyForTesting(
+            listOf(
+                MockRule(
+                    id = "old-rule",
+                    method = "GET",
+                    path = "/x",
+                    response = SdkMockResponse(statusCode = 200),
+                    enabled = true,
+                    effective = true,
+                ),
+            ),
+            version = 1,
+        )
+        handler = { MockResponse().setResponseCode(404).setBody("""{"error":"device_not_registered"}""") }
+        startController()
+
+        waitUntil { controller.connectionState == ConnectionState.OFFLINE }
+        assertNull("404 永久拒绝后旧快照应被清空", MockRuleController.match("GET", "/x"))
     }
 
     // MARK: - 403 + 配对令牌 → TOKEN_INVALID

@@ -66,6 +66,10 @@ object TrafficCaptureController {
     private val lock = Any()
     private var running = false
     private var capturingValue = false
+    /// 仅本次有服务器的启动握手期间暂存 HTTP；首个会话结果或终止后关闭（对齐 iOS startupBufferingValue）。
+    private var startupBufferingValue = false
+    /// HTTP 请求所属采集代次；启动暂存晋升为首个会话时保留，其余会话切换作废（对齐 iOS httpGeneration）。
+    private var httpGeneration = 0L
     /// 是否已 arm（连接层 unconfigured 启动时标记；start 幂等不重复启动定时器）。
     private var armedValue = false
     private var sessionIDValue: String? = null
@@ -146,6 +150,9 @@ object TrafficCaptureController {
         synchronized(lock) {
             if (running) return
             running = true
+            // 首个心跳会话结果前开启有界暂存：capturing 未确认也接管 HTTP（对齐 iOS）。
+            startupBufferingValue = true
+            httpGeneration += 1
             serverURLValue = serverURL
             appIDValue = appID
             didValue = did
@@ -161,7 +168,7 @@ object TrafficCaptureController {
                 }
             }
         }
-        log("traffic capture started")
+        log("traffic capture started (startup buffering enabled until first session result)")
     }
 
     fun stop() {
@@ -169,6 +176,8 @@ object TrafficCaptureController {
             if (!running) return
             running = false
             capturingValue = false
+            startupBufferingValue = false
+            httpGeneration += 1 // 作废所有在途采集代次，迟到回包不得写入后续启动
             sessionIDValue = null
             pending = mutableListOf()
             pendingBytes = 0
@@ -179,43 +188,92 @@ object TrafficCaptureController {
     }
 
     /// 会话状态更新（连接层心跳结果驱动）。
-    /// 会话切换（开始/结束）才清空待上传批次；值未变（心跳重复下发同一状态）
-    /// 时不清空——否则每次心跳都会丢掉 flush 定时器尚未触发的一整段已录流量。
+    /// 首个心跳结果（wasBuffering）：
+    /// - capturing=true → 启动暂存晋升为该会话第一批上传（锁内取出、锁外上传），代次保留，
+    ///   在飞请求（旧代次）仍可归入首个会话（对齐 iOS updateSession 晋升语义）；
+    /// - capturing=false（idle）→ 清空暂存 + 作废代次，迟到回包丢弃，不污染后续手动激活会话。
+    /// 非首心跳的会话切换（开始/结束）清空待上传批次并作废代次；值未变（心跳重复下发
+    /// 同一状态）时不清空——否则每次心跳都会丢掉 flush 定时器尚未触发的一整段已录流量。
     fun updateSession(capturing: Boolean, sessionID: String?) {
+        var startupUpload: TrafficUploadRequest? = null
         val changed = synchronized(lock) {
             if (!running) return
+            val wasBuffering = startupBufferingValue
+            startupBufferingValue = false
             val c = capturingValue != capturing || sessionIDValue != sessionID
             capturingValue = capturing
             sessionIDValue = sessionID
-            if (c) {
-                pending = mutableListOf()
-                pendingBytes = 0
+            if (c || wasBuffering) {
+                if (wasBuffering && capturing) {
+                    // 首次心跳激活：代次保留（在飞请求仍归首个会话，对齐 iOS）；
+                    // 有暂存则晋升为该会话第一批。
+                    if (pending.isNotEmpty() &&
+                        serverURLValue != null && appIDValue != null && didValue != null && sessionID != null
+                    ) {
+                        startupUpload = TrafficUploadRequest(appIDValue!!, didValue!!, sessionID, pending.toList())
+                        pending = mutableListOf()
+                        pendingBytes = 0
+                    }
+                } else {
+                    pending = mutableListOf()
+                    pendingBytes = 0
+                    httpGeneration += 1
+                }
             }
-            c
+            c || wasBuffering
         }
         if (!changed) return
         log(if (capturing) "capture session active ($sessionID)" else "capture session idle; pending cleared")
+        startupUpload?.let { uploadBatch(it, "startup") }
         if (capturing) flush()
     }
 
-    /// 当前是否处于抓包中（Interceptor.canInit 等价判定读取）。
+    /// 当前是否处于抓包中（服务端已确认有效会话；Mock 执行等读取）。
     val isCapturing: Boolean
         get() = synchronized(lock) { running && capturingValue }
+
+    /// 当前可接管 HTTP 的采集代次：有效会话或启动暂存期返回当前代次，否则 null。
+    /// Interceptor 的 canInit 门闩（对齐 iOS httpCaptureGeneration）——启动暂存不改变
+    /// 公开 capturing 状态，但允许启动握手窗口内的业务请求被接管、有界暂存。
+    val httpCaptureGeneration: Long?
+        get() = synchronized(lock) {
+            if (running && (capturingValue || startupBufferingValue)) httpGeneration else null
+        }
+
+    /// 拒绝结果只取消发起握手时绑定的启动代次；归属校验与清空在同一锁内，
+    /// 旧代拒绝不影响重启（对齐 iOS cancelStartupCapture）。
+    fun cancelStartupCapture(generation: Long?) {
+        synchronized(lock) {
+            if (generation == null || !startupBufferingValue || generation != httpGeneration) return
+            startupBufferingValue = false
+            pending = mutableListOf()
+            pendingBytes = 0
+            httpGeneration += 1
+        }
+    }
 
     // MARK: - 采集与攒批
 
     /// 记录一条完整请求/响应（由 MockNetPackInterceptor 调用）。
-    internal fun record(entry: TrafficEntry) {
+    /// generation 由 Interceptor 在请求创建时快照；启动暂存复用 200 条/8MB 有界额度
+    /// （按全量序列化大小计费，对齐 iOS），超限丢新条目、保留最早请求。
+    internal fun record(entry: TrafficEntry, generation: Long? = null) {
         val (tooMany, tooBig) = synchronized(lock) {
-            if (!running || !capturingValue) {
-                false to false
+            if (!running || !(capturingValue || startupBufferingValue)) return
+            if (generation != null && generation != httpGeneration) return
+            val bytes: Int
+            if (startupBufferingValue) {
+                // 启动暂存：有界额度（200 条 / 8MB 全量序列化大小，超限丢新保最早，对齐 iOS）。
+                val size = entryJson(entry).toString().toByteArray(Charsets.UTF_8).size
+                if (pending.size >= MAX_BATCH_COUNT || size > MAX_BATCH_BYTES - pendingBytes) return
+                bytes = size
             } else {
-                val bytes = entry.requestBody.toByteArray(Charsets.UTF_8).size +
+                bytes = entry.requestBody.toByteArray(Charsets.UTF_8).size +
                     (entry.responseBody?.toByteArray(Charsets.UTF_8)?.size ?: 0) + 256
-                pending.add(entry)
-                pendingBytes += bytes
-                (pending.size >= MAX_BATCH_COUNT) to (pendingBytes >= MAX_BATCH_BYTES)
             }
+            pending.add(entry)
+            pendingBytes += bytes
+            (pending.size >= MAX_BATCH_COUNT) to (pendingBytes >= MAX_BATCH_BYTES)
         }
         if (tooMany || tooBig) {
             flush()
@@ -226,7 +284,6 @@ object TrafficCaptureController {
     fun flush() {
         val batch: List<TrafficEntry>
         val sessionID: String
-        val serverURL: String
         val appID: String
         val did: String
         synchronized(lock) {
@@ -237,23 +294,29 @@ object TrafficCaptureController {
             }
             batch = pending.toList()
             sessionID = sessionIDValue!!
-            serverURL = serverURLValue!!
             appID = appIDValue!!
             did = didValue!!
             pending = mutableListOf()
             pendingBytes = 0
         }
 
+        uploadBatch(TrafficUploadRequest(appID, did, sessionID, batch), "traffic")
+    }
+
+    /// 锁外上传一个已绑定设备/会话身份的批次（flush 定时/阈值/会话激活与启动暂存
+    /// 晋升共用同一路径）；失败直接丢弃、不重传（fail-open）。与 iOS uploadHTTP 同语义。
+    private fun uploadBatch(req: TrafficUploadRequest, note: String) {
+        val serverURL = synchronized(lock) { serverURLValue } ?: return
         val client = makeClient(serverURL)
-        val body = uploadRequestJson(TrafficUploadRequest(appID, did, sessionID, batch))
+        val body = uploadRequestJson(req)
         val uploadScope = scope ?: return
         uploadScope.launch {
             try {
                 client.post("traffic", body)
-                log("uploaded ${batch.size} traffic entries")
+                log("uploaded ${req.entries.size} $note entries")
             } catch (e: ConnectionClientError) {
                 // 不做本地缓存、不重传；失败批次直接丢弃（fail-open）。
-                log("traffic upload failed: ${e.message}; batch dropped (no retry)")
+                log("$note upload failed: ${e.message}; batch dropped (no retry)")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             }
