@@ -2,7 +2,7 @@
 
 MockNetPack's Android debug SDK captures HTTP/HTTPS traffic through an OkHttp application interceptor, uploads it in batches, synchronizes device-scoped rules, and returns mock responses locally. No system proxy, VPN, or capture certificate is required.
 
-The project release version is **1.1.1**, as declared in `gradle.properties` and the repository tag. The runtime `MockNetPack.VERSION` reports the same `1.1.1` during registration.
+The project release version is **1.1.1**, as declared in `gradle.properties`; the repository tag is created when this release is published. The runtime `MockNetPack.VERSION` reports the same `1.1.1` during registration.
 
 ## Platform requirements
 
