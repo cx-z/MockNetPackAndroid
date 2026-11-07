@@ -124,6 +124,33 @@ class ConnectionClient private constructor(
         executeJson(request)
     }
 
+    /**
+     * 发起 GET 并返回原始字节（M15：拉取 mock 规则的 binary body blob）。
+     *
+     * 阻塞式而非协程式：调用方是 OkHttp 拦截线程（已在线程池里），再做
+     * `withContext` 只会多一次切换；超时由共享 OkHttpClient 兜底。
+     * 与 JSON get 相同：skipHeader 放行、2xx 即成功、非 2xx 抛 HttpStatus。
+     */
+    internal fun getBytesBlocking(path: String): ByteArray {
+        val request = Request.Builder()
+            .url("$baseURL/$path")
+            .get()
+            .header("Accept", "*/*")
+            .header(MockNetPack.SKIP_HEADER, "1")
+            .build()
+        try {
+            client.newCall(request).execute().use { response ->
+                val code = response.code()
+                if (code !in 200..299) throw ConnectionClientError.HttpStatus(code)
+                return response.body()?.bytes() ?: ByteArray(0)
+            }
+        } catch (e: ConnectionClientError) {
+            throw e
+        } catch (e: IOException) {
+            throw ConnectionClientError.Network(e)
+        }
+    }
+
     /// 轻量可达性探测（扫码连接前使用）：GET 必然 404 的路径，收到任何
     /// HTTP 响应（含 404）即视为连通；传输层错误（不可达）抛 Network。
     suspend fun probe() {

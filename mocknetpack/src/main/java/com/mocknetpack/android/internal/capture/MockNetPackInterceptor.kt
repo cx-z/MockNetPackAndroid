@@ -63,7 +63,20 @@ class MockNetPackInterceptor : Interceptor {
         //    已清空）→ match 返回 null → 走真实网络（fail-open A）。
         val mock = MockRuleController.match(original.method(), original.url().encodedPath())
         if (mock != null) {
-            return serve(mock, original, requestBodySnapshot, startNs, generation)
+            // M15：media 规则（大图）先阻塞取 blob——成功则回放原始字节；失败
+            // （断网/404/尺寸不符）记一条带 error 的命中流量后 fail-open 继续转发
+            // 真实请求，业务侧与「未命中规则」一致，绝不静默吞掉。
+            val media = mock.media
+            val ruleID = mock.ruleId
+            if (media != null && ruleID != null) {
+                val mediaBytes = RuleMediaCache.load(ruleID, media)
+                if (mediaBytes != null) {
+                    return serve(mock, original, requestBodySnapshot, startNs, generation, mediaBytes)
+                }
+                recordMediaFailure(mock, original, requestBodySnapshot, startNs, generation)
+            } else {
+                return serve(mock, original, requestBodySnapshot, startNs, generation, null)
+            }
         }
 
         // 转发：重建 body（快照字节）并去掉 SDK 跳过标记（不发给真实服务器）。
@@ -152,6 +165,7 @@ class MockNetPackInterceptor : Interceptor {
         requestBodyBytes: ByteArray,
         startNs: Long,
         generation: Long,
+        mediaBytes: ByteArray?,
     ): Response {
         // 时间戳必须在 sleep 之前捕获——否则延迟 N 秒后记录的 timestamp 比请求发起时间晚 N 秒，
         // 破坏"请求发起时间"的语义（对齐 iOS startTime）。durationMs 仍由 startNs 计算，包含延迟。
@@ -167,7 +181,9 @@ class MockNetPackInterceptor : Interceptor {
         }
         var headerFields = LinkedHashMap(mock.headers ?: emptyMap())
         if (!headerFields.containsKey("Content-Type")) {
-            headerFields["Content-Type"] = "application/json"
+            // M15：media 规则以服务端记录的图片类型回包（服务端已写入 Content-Type，
+            // 此处是快照丢头的兜底），其余规则沿用历史默认 application/json。
+            headerFields["Content-Type"] = mock.media?.contentType ?: "application/json"
         }
         // 修复：删除动态密钥轮换 header（x-xc-proto-res）。mock 快照是历史捕获的，
         // 其 x-xc-proto-res 是当时的旧密钥；回放给接入方会导致后续真实请求用过期密钥。
@@ -195,13 +211,17 @@ class MockNetPackInterceptor : Interceptor {
             }
         }
 
+        // M15：media 规则的字节由调用方先行取到（mediaBytes），优先级高于
+        // bodyBase64 > body；非 media 规则 mediaBytes 为 null，行为零改动。
+        val payloadBytes: ByteArray = mediaBytes ?: bodyBytes
+
         TrafficCaptureController.record(
             serveEntry(
                 mock = mock,
                 original = original,
                 requestBodyBytes = requestBodyBytes,
                 responseHeaders = filtered,
-                bodyBytes = bodyBytes,
+                bodyBytes = payloadBytes,
                 startNs = startNs,
                 timestamp = timestamp,
             ),
@@ -214,8 +234,34 @@ class MockNetPackInterceptor : Interceptor {
             .code(mock.statusCode)
             .message("Mock")
             .headers(Headers.Builder().apply { for ((k, v) in filtered) add(k, v) }.build())
-            .body(ResponseBody.create(contentType?.let { MediaType.parse(it) }, bodyBytes))
+            .body(ResponseBody.create(contentType?.let { MediaType.parse(it) }, payloadBytes))
             .build()
+    }
+
+    /// media 取字节失败：记一条带 error 的 mocked 命中流量（随后调用方 fail-open
+    /// 转发真实请求，转发路径再记一条真实条目——两条各自可判别，便于 Web 侧看出
+    /// 「规则命中但字节没取到」）。
+    private fun recordMediaFailure(
+        mock: MockResponse,
+        original: Request,
+        requestBodyBytes: ByteArray,
+        startNs: Long,
+        generation: Long,
+    ) {
+        val timestamp = TrafficCaptureController.rfc3339()
+        val base = serveEntry(
+            mock = mock,
+            original = original,
+            requestBodyBytes = requestBodyBytes,
+            responseHeaders = mock.headers ?: emptyMap(),
+            bodyBytes = ByteArray(0),
+            startNs = startNs,
+            timestamp = timestamp,
+        )
+        TrafficCaptureController.record(
+            base.copy(error = "media_unavailable", responseBody = null, responseBodyBase64 = null),
+            generation,
+        )
     }
 
     /// 组装 mocked=true 条目（对齐 iOS serve entry）：请求体展示已捕获快照
@@ -244,7 +290,11 @@ class MockNetPackInterceptor : Interceptor {
             requestBodyDecoded = decodedBody(requestBodyBytes, original.headers()["Content-Type"], isRequest = true),
             statusCode = mock.statusCode,
             responseHeaders = responseHeaders.mapValues { listOf(it.value) },
-            responseBody = mock.body,
+            // M15：media 规则的字节在服务端 blob / 本地缓存里，规则体是空的；命中
+            // 记录照抄 body 会与「空响应」不可区分，故写一句展示占位（与二进制规则
+            // 的 "[binary N bytes]" 同一套约定），字节本身仍不进记录。
+            responseBody = mock.body?.takeIf { it.isNotEmpty() }
+                ?: mock.media?.let { "[原图 ${it.size} 字节，按需拉取]" },
             responseBodyBase64 = mock.bodyBase64,
             responseBodyDecoded = if (bodyBytes.isNotEmpty()) {
                 decodedBody(bodyBytes, responseHeaders["Content-Type"], isRequest = false)

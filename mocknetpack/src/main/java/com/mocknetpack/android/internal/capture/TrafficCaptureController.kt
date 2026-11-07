@@ -184,8 +184,24 @@ object TrafficCaptureController {
             scope?.cancel()
             scope = null
         }
+        // M15：会话结束清空 media 字节缓存（规则快照里只剩 sha256，重新拉取即可）。
+        RuleMediaCache.reset()
         log("traffic capture stopped")
     }
+
+    /// 当前会话的 (serverURL, app, did)：media 回放据此拼 media 端点。
+    /// 未 start（或尚未登记服务器）时返回 null → RuleMediaCache fail-open。
+    internal val mediaReplayContext: MediaReplayContext?
+        get() = synchronized(lock) {
+            val url = serverURLValue
+            val app = appIDValue
+            val did = didValue
+            if (url == null || app == null || did == null) null
+            else MediaReplayContext(serverURL = url, app = app, did = did)
+        }
+
+    /// media 回放所需会话参数（对齐 iOS mediaReplayContext 元组）。
+    internal data class MediaReplayContext(val serverURL: String, val app: String, val did: String)
 
     /// 会话状态更新（连接层心跳结果驱动）。
     /// 首个心跳结果（wasBuffering）：

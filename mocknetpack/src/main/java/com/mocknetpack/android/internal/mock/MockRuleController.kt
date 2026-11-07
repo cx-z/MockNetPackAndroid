@@ -1,5 +1,6 @@
 package com.mocknetpack.android.internal.mock
 
+import com.mocknetpack.android.MediaRef
 import com.mocknetpack.android.MockResponse
 import com.mocknetpack.android.MockRule
 import com.mocknetpack.android.MockRuleList
@@ -221,6 +222,14 @@ object MockRuleController {
             bodyBase64 = json.optString("bodyBase64").takeIf { !json.isNull("bodyBase64") },
             // 服务端 omitempty：仅 delayMs>0 时下发；缺 key/0/null 一律视为无延迟。
             delayMs = json.optInt("delayMs").takeIf { json.has("delayMs") && !json.isNull("delayMs") && it > 0 },
+            // M15：大图规则只带 media 引用（老服务端无该字段 → null，走原路径）。
+            media = json.optJSONObject("media")?.let { m ->
+                MediaRef(
+                    sha256 = m.optString("sha256"),
+                    size = m.optLong("size", 0),
+                    contentType = m.optString("contentType").takeIf { m.has("contentType") && !m.isNull("contentType") },
+                )
+            },
         )
     }
 
@@ -243,6 +252,15 @@ object MockRuleController {
         r.response.body?.let { resp.put("body", it) }
         r.response.bodyBase64?.let { resp.put("bodyBase64", it) }
         r.response.delayMs?.let { resp.put("delayMs", it) }
+        // M15：快照持久化必须带上 media，否则冷启动回放会退化成空 body。
+        r.response.media?.let { m ->
+            resp.put(
+                "media",
+                JSONObject().put("sha256", m.sha256).put("size", m.size).apply {
+                    m.contentType?.let { put("contentType", it) }
+                },
+            )
+        }
         return JSONObject()
             .put("id", r.id)
             .put("method", r.method)

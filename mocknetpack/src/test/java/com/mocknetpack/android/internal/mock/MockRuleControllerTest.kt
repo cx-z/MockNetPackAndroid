@@ -18,6 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -403,5 +404,31 @@ class MockRuleControllerTest {
             "并发下不应有异常或越界规则: ${errors.joinToString { it.message ?: it.toString() }}",
             errors.isEmpty(),
         )
+    }
+
+    /// M15：media 引用随规则下发并被快照持久化——冷启动回放不能退化成空 body。
+    @Test
+    fun `parse and serialize preserve media ref`() {
+        val json = JSONObject(
+            rulesJson(
+                JSONObject(
+                    """{"id":"r-media","method":"GET","path":"/img/big.png","enabled":true,""" +
+                        """"effective":true,"response":{"statusCode":200,"headers":{"Content-Type":"image/png"},""" +
+                        """"media":{"sha256":"abc123","size":7400000,"contentType":"image/png"}}}""",
+                ),
+            ),
+        )
+        val list = MockRuleController.parseRuleList(json)
+        val media = list.rules[0].response.media
+        assertNotNull(media)
+        assertEquals("abc123", media!!.sha256)
+        assertEquals(7_400_000L, media.size)
+        assertEquals("image/png", media.contentType)
+
+        // 序列化后再解析，media 字段不丢（快照持久化路径）。
+        val roundtrip = MockRuleController.parseRuleList(
+            JSONObject().put("version", list.version).put("rules", MockRuleController.rulesToJsonArray(list.rules)),
+        )
+        assertEquals("abc123", roundtrip.rules[0].response.media!!.sha256)
     }
 }
