@@ -23,10 +23,10 @@ import com.mocknetpack.android.internal.store.ServerAddressStore
 object MockNetPack {
 
     /// SDK 版本号（发布版本；接入方通过 GitHub/JitPack 按版本号集成）。
-    /// M15（大图 media 回放）起为 1.2.0：服务端按建规则时的 sdkVersion 门控
+    /// M15（大图 media 回放）起为 1.1.1（与 iOS 同口径）：服务端按建规则时的 sdkVersion 门控
     /// （>= MockMediaMinSDKVersion 才下发 media 规则），低于此版本的设备仍走
     /// 原有占位 body 回放。
-    const val VERSION = "1.2.0"
+    const val VERSION = "1.1.1"
 
     /// SDK 自身请求的跳过标记 header（对齐 iOS X-MockNetPack-Skip）。
     const val SKIP_HEADER = "X-MockNetPack-Skip"
