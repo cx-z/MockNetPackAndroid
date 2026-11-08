@@ -2,7 +2,6 @@ package com.mocknetpack.android.internal.capture
 
 import com.mocknetpack.android.MockNetPack
 import com.mocknetpack.android.MockResponse
-import com.mocknetpack.android.TrafficEntry
 import com.mocknetpack.android.internal.mock.MockRuleController
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -40,6 +39,8 @@ import okio.Okio
  *   1MB 的录制缓冲；不整体缓冲大响应、不破坏流式语义；body 消费完成（EOF
  *   或 close）时组装条目。超限记 `[binary N bytes]` 占位 + base64。
  * - 回放三级 fallback / header 过滤 / Content-Type 补全：AN-3 实现。
+ * - AN-10 M1：条目组装统一交给 [HttpExchangeRecorder]（body 三态 / 1MB 截断 /
+ *   base64 / codec 槽只有一份实现），本类只负责"从 OkHttp 取数 + 组装快照"。
  */
 class MockNetPackInterceptor : Interceptor {
 
@@ -98,19 +99,21 @@ class MockNetPackInterceptor : Interceptor {
             response = chain.proceed(forwarded)
         } catch (e: IOException) {
             // 请求失败：记录 error 条目（失败请求不保留状态码/响应字段）并上抛。
-            val entry = buildEntry(
-                request = original,
-                requestBody = RequestBodyRecord(requestBodySnapshot, requestBodySnapshot.size.toLong(), false),
-                startNs = startNs,
-                response = null,
-                statusCode = null,
-                responseHeaders = null,
-                recordedBody = null,
-                totalBodyBytes = 0,
-                error = e.message ?: e.javaClass.simpleName,
-                contentType = original.body()?.contentType()?.toString(),
+            HttpExchangeRecorder.record(
+                requestExchange(
+                    request = original,
+                    requestBody = RequestBodyRecord(
+                        sampleBytes = requestBodySnapshot,
+                        fullSize = requestBodySnapshot.size.toLong(),
+                        unavailable = false,
+                    ),
+                    startNs = startNs,
+                    statusCode = null,
+                    responseHeaders = null,
+                    error = e.message ?: e.javaClass.simpleName,
+                ),
+                generation,
             )
-            TrafficCaptureController.record(entry, generation)
             throw e
         }
 
@@ -135,18 +138,17 @@ class MockNetPackInterceptor : Interceptor {
         val responseHeaders = headersToMultimap(response.headers())
         val statusCode = response.code()
         tee.onComplete = { body ->
-            TrafficCaptureController.record(
-                buildEntry(
+            HttpExchangeRecorder.record(
+                requestExchange(
                     request = selected,
                     requestBody = selectedBody,
                     startNs = startNs,
-                    response = response,
                     statusCode = statusCode,
                     responseHeaders = responseHeaders,
-                    recordedBody = body.recordedBytes(),
-                    totalBodyBytes = body.totalBytes,
+                    responseBodySample = body.recordedBytes(),
+                    responseBodyFullSize = body.totalBytes,
+                    responseBodyContentType = bodyContentType,
                     error = null,
-                    contentType = bodyContentType,
                 ),
                 generation,
             )
@@ -215,14 +217,31 @@ class MockNetPackInterceptor : Interceptor {
         // bodyBase64 > body；非 media 规则 mediaBytes 为 null，行为零改动。
         val payloadBytes: ByteArray = mediaBytes ?: bodyBytes
 
-        TrafficCaptureController.record(
-            serveEntry(
-                mock = mock,
-                original = original,
-                requestBodyBytes = requestBodyBytes,
-                responseHeaders = filtered,
-                bodyBytes = payloadBytes,
-                startNs = startNs,
+        HttpExchangeRecorder.record(
+            CapturedExchange(
+                method = original.method(),
+                url = original.url().toString(),
+                path = original.url().encodedPath(),
+                query = original.url().encodedQuery() ?: "",
+                requestHeaders = headersToMultimap(original.headers()),
+                requestBodySample = requestBodyBytes,
+                requestBodyFullSize = requestBodyBytes.size.toLong(),
+                requestBodyContentType = original.headers()["Content-Type"],
+                statusCode = mock.statusCode,
+                responseHeaders = filtered.mapValues { listOf(it.value) },
+                // M15：media 规则的字节在服务端 blob / 本地缓存里，规则体是空的；命中
+                // 记录照抄 body 会与「空响应」不可区分，故写一句展示占位（与二进制规则
+                // 的 "[binary N bytes]" 同一套约定），字节本身仍不进记录。
+                mockResponseBodyText = mock.body?.takeIf { it.isNotEmpty() }
+                    ?: mock.media?.let { "[原图 ${it.size} 字节，按需拉取]" },
+                mockResponseBodyBase64 = mock.bodyBase64,
+                mockResponseDecodeBytes = payloadBytes,
+                responseBodyContentType = contentType,
+                error = null,
+                durationMs = elapsedMs(startNs),
+                adapter = HttpExchangeRecorder.ADAPTER_OKHTTP,
+                mocked = true,
+                matchedRuleId = mock.ruleId,
                 timestamp = timestamp,
             ),
             generation,
@@ -249,135 +268,84 @@ class MockNetPackInterceptor : Interceptor {
         generation: Long,
     ) {
         val timestamp = TrafficCaptureController.rfc3339()
-        val base = serveEntry(
-            mock = mock,
-            original = original,
-            requestBodyBytes = requestBodyBytes,
-            responseHeaders = mock.headers ?: emptyMap(),
-            bodyBytes = ByteArray(0),
-            startNs = startNs,
-            timestamp = timestamp,
-        )
-        TrafficCaptureController.record(
-            base.copy(error = "media_unavailable", responseBody = null, responseBodyBase64 = null),
+        val headers = mock.headers ?: emptyMap()
+        HttpExchangeRecorder.record(
+            CapturedExchange(
+                method = original.method(),
+                url = original.url().toString(),
+                path = original.url().encodedPath(),
+                query = original.url().encodedQuery() ?: "",
+                requestHeaders = headersToMultimap(original.headers()),
+                requestBodySample = requestBodyBytes,
+                requestBodyFullSize = requestBodyBytes.size.toLong(),
+                requestBodyContentType = original.headers()["Content-Type"],
+                statusCode = mock.statusCode,
+                responseHeaders = headers.mapValues { listOf(it.value) },
+                // 取字节失败：响应体两态一律置空（与历史 copy(error=..) 语义一致），
+                // 只保留「规则命中但字节没取到」这一条可判别记录。
+                mockResponseBodyText = null,
+                mockResponseBodyBase64 = null,
+                mockResponseDecodeBytes = ByteArray(0),
+                responseBodyContentType = headers["Content-Type"],
+                error = "media_unavailable",
+                durationMs = elapsedMs(startNs),
+                adapter = HttpExchangeRecorder.ADAPTER_OKHTTP,
+                mocked = true,
+                matchedRuleId = mock.ruleId,
+                timestamp = timestamp,
+            ),
             generation,
         )
     }
 
-    /// 组装 mocked=true 条目（对齐 iOS serve entry）：请求体展示已捕获快照
-    /// （不可重读流式 request body）；responseBody 用规则展示文本、base64 原字节、
-    /// 回放字节尝试解码展示；matchedRuleId 随命中规则透传。
-    private fun serveEntry(
-        mock: MockResponse,
-        original: Request,
-        requestBodyBytes: ByteArray,
-        responseHeaders: Map<String, String>,
-        bodyBytes: ByteArray,
-        startNs: Long,
-        timestamp: String,
-    ): TrafficEntry {
-        val durationMs = ((System.nanoTime() - startNs) / 1_000_000).toInt().coerceAtLeast(0)
-        val reqParts = bodyParts(requestBodyBytes, requestBodyBytes.size.toLong())
-        return TrafficEntry(
-            timestamp = timestamp,
-            method = original.method(),
-            url = original.url().toString(),
-            path = original.url().encodedPath(),
-            query = original.url().encodedQuery() ?: "",
-            requestHeaders = headersToMultimap(original.headers()),
-            requestBody = reqParts.first,
-            requestBodyBase64 = reqParts.second,
-            requestBodyDecoded = decodedBody(requestBodyBytes, original.headers()["Content-Type"], isRequest = true),
-            statusCode = mock.statusCode,
-            responseHeaders = responseHeaders.mapValues { listOf(it.value) },
-            // M15：media 规则的字节在服务端 blob / 本地缓存里，规则体是空的；命中
-            // 记录照抄 body 会与「空响应」不可区分，故写一句展示占位（与二进制规则
-            // 的 "[binary N bytes]" 同一套约定），字节本身仍不进记录。
-            responseBody = mock.body?.takeIf { it.isNotEmpty() }
-                ?: mock.media?.let { "[原图 ${it.size} 字节，按需拉取]" },
-            responseBodyBase64 = mock.bodyBase64,
-            responseBodyDecoded = if (bodyBytes.isNotEmpty()) {
-                decodedBody(bodyBytes, responseHeaders["Content-Type"], isRequest = false)
-            } else {
-                null
-            },
-            error = null,
-            durationMs = durationMs,
-            mocked = true,
-            matchedRuleId = mock.ruleId,
-        )
-    }
-
-    /// 组装一条 TrafficEntry（mocked=false；转发路径）。
-    /// requestBody 为选定请求体的记录快照（AN7）：URL/method/headers/body
-    /// 统一出自 request，不再与链入口 original 混用。
-    private fun buildEntry(
+    /// 组装"请求侧 + 可选响应侧"的统一快照（转发 / 失败 / tee 完成三条路径共用）。
+    /// URL / method / headers / body 统一取自传入的 request（AN7 修正后为最终网络请求）。
+    private fun requestExchange(
         request: Request,
         requestBody: RequestBodyRecord,
         startNs: Long,
-        response: Response?,
         statusCode: Int?,
         responseHeaders: Map<String, List<String>>?,
-        recordedBody: ByteArray?,
-        totalBodyBytes: Long,
         error: String?,
-        contentType: String?,
-    ): TrafficEntry {
-        val durationMs = ((System.nanoTime() - startNs) / 1_000_000).toInt().coerceAtLeast(0)
-        val reqParts = requestBodyParts(requestBody)
-        val respParts = recordedBody?.let { bodyParts(it, totalBodyBytes) }
-        val respContentType = contentType
-        return TrafficEntry(
-            timestamp = TrafficCaptureController.rfc3339(),
-            method = request.method(),
-            url = request.url().toString(),
-            path = request.url().encodedPath(),
-            query = request.url().encodedQuery() ?: "",
-            requestHeaders = headersToMultimap(request.headers()),
-            requestBody = reqParts.first,
-            requestBodyBase64 = reqParts.second,
-            requestBodyDecoded = decodedBody(requestBody.sampleBytes, request.headers()["Content-Type"], isRequest = true),
-            statusCode = statusCode,
-            responseHeaders = responseHeaders,
-            responseBody = respParts?.first,
-            responseBodyBase64 = respParts?.second,
-            responseBodyDecoded = decodedBody(recordedBody, respContentType, isRequest = false),
-            error = error,
-            durationMs = durationMs,
-            mocked = false,
-            matchedRuleId = null,
-        )
-    }
+        responseBodySample: ByteArray? = null,
+        responseBodyFullSize: Long = 0,
+        responseBodyContentType: String? = null,
+    ): CapturedExchange = CapturedExchange(
+        method = request.method(),
+        url = request.url().toString(),
+        path = request.url().encodedPath(),
+        query = request.url().encodedQuery() ?: "",
+        requestHeaders = headersToMultimap(request.headers()),
+        requestBodySample = requestBody.sampleBytes,
+        requestBodyFullSize = requestBody.fullSize,
+        requestBodyUnavailable = requestBody.unavailable,
+        requestBodyContentType = request.headers()["Content-Type"],
+        statusCode = statusCode,
+        responseHeaders = responseHeaders,
+        responseBodySample = responseBodySample,
+        responseBodyFullSize = responseBodyFullSize,
+        responseBodyContentType = responseBodyContentType,
+        error = error,
+        durationMs = elapsedMs(startNs),
+        adapter = HttpExchangeRecorder.ADAPTER_OKHTTP,
+    )
 
-    // MARK: - body 治理（对齐 iOS MockNetPackURLProtocol.bodyParts / decodedBody）
+    /// 单位统一的耗时计算（毫秒，下限 0）。
+    private fun elapsedMs(startNs: Long): Int =
+        ((System.nanoTime() - startNs) / 1_000_000).toInt().coerceAtLeast(0)
 
-    /// 返回 (展示文本, base64)。二进制时展示为占位文本、base64 携带原始字节
-    /// （样本 1MB）；文本时 base64 为 nil。fullSize 用于占位 N（截断时总大小）。
-    internal fun bodyParts(data: ByteArray?, fullSize: Long): Pair<String, String?> {
-        if (data == null || data.isEmpty()) return "" to null
-        val limit = MockNetPack.BODY_LIMIT_BYTES.toInt()
-        val sample = if (data.size > limit) data.copyOfRange(0, limit) else data
-        val text = TrafficCaptureController.tryDecodeUtf8(sample)
-        return if (text != null) {
-            text to null
-        } else {
-            "[binary $fullSize bytes]" to com.mocknetpack.android.internal.util.SDKBase64.encode(sample)
-        }
-    }
+    // MARK: - body 治理（委托 HttpExchangeRecorder，保留旧调用点）
+
+    /// 返回 (展示文本, base64)；二进制走占位 + base64 样本（实现见记录器）。
+    internal fun bodyParts(data: ByteArray?, fullSize: Long): Pair<String, String?> =
+        HttpExchangeRecorder.bodyParts(data, fullSize)
 
     /// 用 App 注入的解码器把二进制 body 解成可读 UTF-8 文本（仅展示）。
-    /// isRequest=true 走请求体专用解码槽位（业务请求体/响应体编码不对称时）。
-    internal fun decodedBody(data: ByteArray?, contentType: String?, isRequest: Boolean): String? {
-        if (data == null || data.isEmpty()) return null
-        val decoder = if (isRequest) TrafficCaptureController.requestBodyDecoder
-        else TrafficCaptureController.bodyDecoder
-        if (decoder == null) return null
-        val limit = MockNetPack.BODY_LIMIT_BYTES.toInt()
-        val sample = if (data.size > limit) data.copyOfRange(0, limit) else data
-        return decoder(sample, contentType)
-    }
+    internal fun decodedBody(data: ByteArray?, contentType: String?, isRequest: Boolean): String? =
+        HttpExchangeRecorder.decodedBody(data, contentType, isRequest)
 
     /// 请求体快照：读一次并返回字节（转发用快照重建，保证不丢 body）。
+    /// AN-10 M3a-0 会改为委托式 TeeRequestBody（此处保持 M1 行为不变）。
     private fun snapshotRequestBody(request: Request): ByteArray {
         val body = request.body() ?: return ByteArray(0)
         val buffer = Buffer()
@@ -428,20 +396,6 @@ class MockNetPackInterceptor : Interceptor {
             result.getOrPut(headers.name(i)) { mutableListOf() }.add(headers.value(i))
         }
         return result
-    }
-
-    /// 请求体展示（AN7）：unavailable → [body unavailable]；文本超限 → 加
-    /// [truncated N bytes] 前缀；二进制 / 常规走 bodyParts（占位 + base64 样本）。
-    private fun requestBodyParts(record: RequestBodyRecord): Pair<String, String?> {
-        if (record.unavailable) return "[body unavailable]" to null
-        val parts = bodyParts(record.sampleBytes, record.fullSize)
-        val truncatedText = record.fullSize > MockNetPack.BODY_LIMIT_BYTES.toInt() &&
-            parts.second == null && parts.first.isNotEmpty()
-        return if (truncatedText) {
-            "[truncated ${record.fullSize} bytes] ${parts.first}" to null
-        } else {
-            parts
-        }
     }
 }
 

@@ -199,6 +199,8 @@ class MockNetPackInterceptorTest {
         assertEquals(200, entry.optInt("statusCode"))
         assertEquals("""{"hello":"world"}""", entry.optString("responseBody"))
         assertEquals(false, entry.optBoolean("mocked"))
+        // AN-10 M1：OkHttp 采集条目带 adapter=okhttp（Web 据此区分采集方式）。
+        assertEquals("okhttp", entry.optString("adapter"))
         assertTrue(entry.optInt("durationMs") >= 0)
         assertTrue(entry.has("requestHeaders"))
     }
@@ -309,6 +311,8 @@ class MockNetPackInterceptorTest {
         val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
         assertEquals(true, entry.optBoolean("mocked"))
         assertEquals("r1", entry.optString("matchedRuleId"))
+        // mocked 条目同样标注采集方式（来源仍是 OkHttp 拦截器）。
+        assertEquals("okhttp", entry.optString("adapter"))
         assertEquals(200, entry.optInt("statusCode"))
         assertEquals("""{"mocked":true,"hello":"world"}""", entry.optString("responseBody"))
         // 请求体已捕获展示（快照）。

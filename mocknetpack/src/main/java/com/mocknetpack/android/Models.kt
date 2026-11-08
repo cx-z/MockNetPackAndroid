@@ -160,6 +160,10 @@ internal data class TrafficEntry(
     val mocked: Boolean = false,
     /// 命中的规则 ID：仅 mocked=true 时非空。
     val matchedRuleId: String? = null,
+    /// 采集方式（契约 v0.13.0 / AN-10 D4a）：`okhttp` / `httpurlconnection` /
+    /// 业务自填（如 `cronet`）。老客户端与老服务端都不带该字段 → null，
+    /// Web 显示 "—"，用于区分「哪个接入面抓到的」。
+    val adapter: String? = null,
 )
 
 /// 批量上传请求（契约 TrafficUploadRequest；单批 ≤500 条，由 SDK 攒批控制）。

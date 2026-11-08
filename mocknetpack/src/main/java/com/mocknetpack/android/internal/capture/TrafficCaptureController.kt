@@ -484,6 +484,8 @@ object TrafficCaptureController {
         j.put("durationMs", e.durationMs)
         j.put("mocked", e.mocked)
         e.matchedRuleId?.let { j.put("matchedRuleId", it) }
+        // AN-10 D4a：采集方式（可选；沿用 omitempty 风格，null 不出现在 JSON 里）。
+        e.adapter?.let { j.put("adapter", it) }
         return j
     }
 
