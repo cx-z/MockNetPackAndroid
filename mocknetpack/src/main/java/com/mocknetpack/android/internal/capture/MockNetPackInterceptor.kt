@@ -49,6 +49,8 @@ class MockNetPackInterceptor : Interceptor {
         //    记录与迟到回包归属均使用该代次（对齐 iOS URLProtocol.init 快照 generation）。
         val generation = TrafficCaptureController.httpCaptureGeneration
             ?: return chain.proceed(chain.request())
+        // 运行时自检：确实有请求经过 SDK（供 5s 无调用 WARN 判定）。
+        TrafficCaptureController.noteIntercepted()
         val original = chain.request()
         val scheme = original.url().scheme()
         if (scheme != "http" && scheme != "https") return chain.proceed(original)

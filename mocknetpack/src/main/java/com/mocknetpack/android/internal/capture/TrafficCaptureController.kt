@@ -64,6 +64,7 @@ object TrafficCaptureController {
     // MARK: - 状态（锁保护）
 
     private val lock = Any()
+    @Volatile
     private var running = false
     private var capturingValue = false
     /// 仅本次有服务器的启动握手期间暂存 HTTP；首个会话结果或终止后关闭（对齐 iOS startupBufferingValue）。
@@ -77,6 +78,16 @@ object TrafficCaptureController {
     private var didValue: String? = null
     private var serverURLValue: String? = null
     private var logHandler: ((String) -> Unit)? = null
+
+    /// 运行时自检计数（三级可见性之二）：OkHttp 拦截器每次真正接管自增一次。
+    /// 会话 start 后 5s 仍为 0 → 提示 instrumented 可能为 false（插件未生效 /
+    /// kill switch 关闭 / 确实没有业务请求）。
+    private val interceptedCount = java.util.concurrent.atomic.AtomicLong(0)
+
+    /// 拦截器入口调用（内部使用）：标记"有请求经过 SDK"。
+    internal fun noteIntercepted() {
+        interceptedCount.incrementAndGet()
+    }
 
     private var pending = mutableListOf<TrafficEntry>()
     private var pendingBytes = 0
@@ -165,6 +176,18 @@ object TrafficCaptureController {
                 while (isActive) {
                     delay(flushIntervalMs)
                     flush()
+                }
+            }
+            // 运行时自检：会话开始后 5s 仍没有任何请求经过 SDK → 提示 instrumented
+            // 可能为 false（插件未织入 / kill switch 关闭 / 5s 内确实没有业务请求）。
+            val baseline = interceptedCount.get()
+            s.launch {
+                delay(5_000)
+                if (running && interceptedCount.get() == baseline) {
+                    log(
+                        "WARN instrumented=false: 5s 内未拦截到任何 OkHttp 请求" +
+                            "（插件未生效/被 -Pmocknetpack.instrument=false 关闭/确实无业务请求）",
+                    )
                 }
             }
         }

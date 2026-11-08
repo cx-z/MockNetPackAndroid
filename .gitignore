@@ -11,3 +11,4 @@
 *.apk
 *.aab
 *.hprof
+/mocknetpack-instrument/build

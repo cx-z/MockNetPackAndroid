@@ -82,7 +82,49 @@ object MockNetPack {
      * Android 没有可 swizzle 的全局 URL 加载系统，OkHttp 是事实标准；
      * 业务侧接入成本为每个 OkHttpClient 工厂一行（Debug-only）。
      */
-    fun interceptor(): okhttp3.Interceptor = MockNetPackInterceptor()
+    fun interceptor(): okhttp3.Interceptor = singletonInterceptor
+
+    /// 单例拦截器（AN-10 M3a-1）：`install` / 手动 `addInterceptor` 共用同一实例，
+    /// 避免每次 `interceptor()` 都 new 一个（同一 client 被重复注入时也不会多份状态）。
+    private val singletonInterceptor: okhttp3.Interceptor by lazy { MockNetPackInterceptor() }
+
+    /// 已注入过的 Builder（弱引用，避免持有宿主 builder）。`install` 按 builder 幂等：
+    /// 宿主显式 install + 插件在 `OkHttpClient(Builder)` 构造处织入 install 时，
+    /// 同一次构建只加一份拦截器，不会双份上报（AN-10 M3a-1 硬要求）。
+    private val installedBuilders =
+        java.util.Collections.synchronizedMap(
+            java.util.WeakHashMap<okhttp3.OkHttpClient.Builder, Boolean>(),
+        )
+
+    /// 供插桩插件在 `OkHttpClient(Builder)` 构造入口调用：给该 builder 注入采集拦截器。
+    ///
+    /// - 幂等：同一个 Builder 多次 install 只生效一次（宿主显式调用 + 插件织入不重复）；
+    /// - [decorator] 可选：宿主用自己的拦截器包住 SDK 拦截器（如解码/Mock 之外的
+    ///   业务加解密），SDK 仍在内层，语义与手动 `addInterceptor(Crypto(interceptor()))`
+    ///   一致；
+    /// - fail-open：任何异常只打日志，不影响宿主构建 client。
+    @JvmOverloads
+    @JvmStatic
+    fun install(
+        builder: okhttp3.OkHttpClient.Builder,
+        decorator: ((okhttp3.Interceptor) -> okhttp3.Interceptor)? = null,
+    ) {
+        if (installedBuilders.put(builder, true) != null) return
+        try {
+            val sdk = singletonInterceptor
+            builder.addInterceptor(decorator?.invoke(sdk) ?: sdk)
+            com.mocknetpack.android.internal.log.SDKLogger.info(
+                "interceptor installed (v$VERSION, decorator=${decorator != null})",
+                category = "install",
+            )
+        } catch (t: Throwable) {
+            installedBuilders.remove(builder)
+            com.mocknetpack.android.internal.log.SDKLogger.warn(
+                "install failed, skip instrumentation: ${t.javaClass.simpleName}",
+                category = "install",
+            )
+        }
+    }
 
     /**
      * HttpURLConnection 采集入口（AN-10 M2）：包一层再返回同一个语义的连接。
