@@ -2,7 +2,7 @@
 
 MockNetPack's Android debug SDK captures HTTP/HTTPS traffic through an OkHttp application interceptor, uploads it in batches, synchronizes device-scoped rules, and returns mock responses locally. No system proxy, VPN, or capture certificate is required.
 
-The project release version is **1.0.1**, as declared in `gradle.properties` and the repository tag. The runtime `MockNetPack.VERSION` still reports `1.0.0` during registration; use the release version when selecting the dependency.
+The project release version is **1.0.1**, as declared in `gradle.properties`, the repository tag, and the runtime `MockNetPack.VERSION` reported during registration.
 
 ## Platform requirements
 
@@ -14,7 +14,7 @@ The project release version is **1.0.1**, as declared in `gradle.properties` and
 | Business network integration | OkHttp application interceptor; current dependency is OkHttp 3.12.8 |
 | QR scanning | CameraX + bundled ML Kit barcode, without Google Play Services |
 
-Capture covers only OkHttpClient instances that include the interceptor. Initializing the SDK does not automatically capture other HTTP clients, WebView, or socket traffic.
+Capture covers: every `OkHttpClient` (when the instrumentation plugin is applied, see below) or only the clients that call `install`/`interceptor()`; `HttpURLConnection` connections explicitly wrapped with `MockNetPack.wrap(conn)`; and traffic reported by the host through `MockNetPack.reportHttp(...)`. WebView/H5, native (NDK) network stacks, and raw sockets are not captured.
 
 ## Versioned integration
 
@@ -57,6 +57,8 @@ val client = OkHttpClient.Builder()
     .build()
 ```
 
+> Prefer the build-time plugin below instead of hand-adding the interceptor to each client: it covers clients created inside third-party libraries too. `MockNetPack.install(builder)` is idempotent per builder, so mixing both paths never double-reports.
+
 Without a saved address, `start()` enters `UNCONFIGURED` without contacting the server. If the host has a stable device ID, use `start(did = businessDeviceID)`. Otherwise, the SDK generates and persists an app-scoped did.
 
 Launch QR pairing from an Activity's debug entry point:
@@ -79,6 +81,57 @@ MockNetPack.connectByScan(this) { result ->
 ```
 
 The server address comes from the pairing QR code, so business code does not need a hard-coded address. Call `start()` on later launches to reconnect. Scan again to change servers; a failed scan does not overwrite the saved address. Callbacks run on the main thread. Avoid launching overlapping scan flows.
+
+## Two-line plugin integration (recommended)
+
+The `mocknetpack-instrument` Gradle plugin weaves `MockNetPack.install(builder)` into every `okhttp3.OkHttpClient(Builder)` constructor at build time, so clients created by libraries (image loaders, downloaders, ad SDKs) are captured without touching their code.
+
+```groovy
+// app/build.gradle — top of file, in buildscript { repositories { mavenLocal(); google(); mavenCentral() } }
+classpath 'com.mocknetpack.android:mocknetpack-instrument:1.0.1'   // or the JitPack coordinate
+// after `apply plugin: 'com.android.application'`
+apply plugin: 'com.mocknetpack.android.instrument'
+```
+
+Behavior and safety:
+
+- **Debug only.** Only `debuggable` variants that are not `preview` are instrumented; release/preview builds contain neither the weaving nor the SDK.
+- **Fail-open.** Non-Android projects, an incompatible AGP, a missing `MockNetPack` class, or any ASM error logs a warning and skips instrumentation — the build and the app keep working. The injected call is also wrapped in `try/catch (Throwable)`.
+- **Kill switch.** `-Pmocknetpack.instrument=false` or `mocknetpack { enabled = false }` disables it for one build.
+- **No double reporting.** `install` is idempotent per `OkHttpClient.Builder` (`WeakHashMap`), so the plugin and your own `install(builder) { crypto }` call collapse into one interceptor.
+- **Self-check.** If no interception happens within 5 s after a capture session starts, the SDK logs `instrumented=false` (a strong hint that the plugin was not applied).
+- **Build log.** With `-i`: `[mocknetpack] instrumentation enabled for variant '...'` / `variant '...' skipped: debug-only instrumentation`.
+
+### HttpURLConnection and self-reported traffic
+
+```kotlin
+// HttpURLConnection (only captured while a session is active; no Mock here)
+val conn = URL(url).openConnection() as HttpURLConnection
+MockNetPack.wrap(conn)
+
+// Self-built network stacks (Cronet, native callbacks, custom sockets)
+MockNetPack.reportHttp(
+    method = "GET", url = url, statusCode = 200, durationMs = 12,
+    requestHeaders = mapOf(), responseHeaders = mapOf(),
+    requestBody = null, responseBody = bytes, adapter = "cronet",
+)
+```
+
+### 常见问题 / FAQ
+
+- **设备页显示「未插桩」** — the `capabilities.instrumented=false` badge means no `install` call ever came from an `OkHttpClient` constructor in this build: the plugin was not applied (or was disabled), or the app only calls `interceptor()`. Capture still works for clients you installed manually.
+- **插件会不会改坏报文？** — No. Only one `invoke-static` is inserted into the constructor; request/response bytes are untouched (request bodies use a delegating tee that preserves `contentLength`).
+- **会不会上报两次？** — No, see idempotency above. The same `TrafficEntry` appears once.
+- **同一条流量会不会重复出现在 Web？** — Only if the same URL is genuinely requested by two different stacks; `adapter` distinguishes them. Capture does not de-duplicate by URL on purpose.
+- **为什么 release 包里没有 SDK？** — By design; the plugin is debug-only and the dependency should stay `debugImplementation`.
+
+### 抓不到什么（Known blind spots）
+
+- **WebView / H5** — not instrumented in this batch (no URLProtocol equivalent).
+- **Native (NDK) HTTP stacks** — including ad SDKs that issue requests from native code; only their Java/Kotlin OkHttp layer is visible.
+- **Raw sockets / custom protocols** — unless the host reports them via `reportHttp`.
+- **Clients derived from a client that was never instrumented** — `newBuilder()` copies the interceptor list of the source client; a client built in a non-instrumented build (or by reflection) stays uncovered.
+- **Release builds** — no SDK, no capture by design.
 
 ## Server pairing and capture
 
@@ -106,6 +159,9 @@ The phone must be able to reach the deployed server address in the QR code. For 
 |---|---|
 | `initialize(context)` | Supply ApplicationContext before other SDK operations |
 | `interceptor()` | Supply an application interceptor for business OkHttpClient instances |
+| `install(builder)` / `install(builder) { decorator }` | Idempotently attach the SDK interceptor to one builder (used by the plugin; keeps an existing crypto wrapper via `decorator`) |
+| `wrap(conn)` / `wrap(conn, adapter)` | Capture an `HttpURLConnection` (no-op when no session is active) |
+| `reportHttp(...)` | Report traffic from a self-built network stack (default `adapter = "business"`) |
 | `start(did)` / `stop()` | Start or stop the connection; stopping preserves did and the saved address |
 | `did` / `savedServerURL` | Inspect the device ID and saved address |
 | `connectionState` | `UNCONFIGURED` / `CONNECTING` / `CONNECTED` / `OFFLINE` / `TOKEN_INVALID` |
