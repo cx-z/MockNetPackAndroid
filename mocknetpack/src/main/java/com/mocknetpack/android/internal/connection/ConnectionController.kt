@@ -95,6 +95,10 @@ class ConnectionController internal constructor() {
     private var pairingTokenValue: String? = null
     private var deviceNameValue: String? = null
 
+    /// SDK 能力声明（AN-10 M3a-2）：由 MockNetPack 门面传入，ConnectionController
+    /// 自身不触碰 MockNetPack 单例（否则 JVM 单测会触发 Looper 初始化）。
+    private var capabilitiesValue: com.mocknetpack.android.SdkCapabilities? = null
+
     private var serverConfig = ServerConfig(heartbeatIntervalSeconds = 5, heartbeatTimeoutSeconds = 60)
     private var registered = false
     /// 设备未在 Web 注册（register/heartbeat 404）→ 静默停循环，不再重试。
@@ -140,6 +144,7 @@ class ConnectionController internal constructor() {
         osVersion: String,
         pairingToken: String? = null,
         deviceName: String? = null,
+        capabilities: com.mocknetpack.android.SdkCapabilities? = null,
         logHandler: ((String) -> Unit)? = null,
     ) {
         synchronized(lock) {
@@ -162,6 +167,7 @@ class ConnectionController internal constructor() {
             currentBackoff = backoffBaseSeconds
             pairingTokenValue = pairingToken
             deviceNameValue = deviceName
+            capabilitiesValue = capabilities
             scope = CoroutineScope(SupervisorJob() + schedulerDispatcher)
         }
 
@@ -189,6 +195,7 @@ class ConnectionController internal constructor() {
         appName: String? = null,
         sdkVersion: String,
         osVersion: String,
+        capabilities: com.mocknetpack.android.SdkCapabilities? = null,
         logHandler: ((String) -> Unit)? = null,
     ) {
         synchronized(lock) {
@@ -203,6 +210,7 @@ class ConnectionController internal constructor() {
             osVersionValue = osVersion
             didValue = externalDID ?: DIDStore.did(appID ?: "")
             this.logHandler = logHandler
+            capabilitiesValue = capabilities
             pairingTokenValue = null
             deviceNameValue = null
             registered = false
@@ -398,6 +406,7 @@ class ConnectionController internal constructor() {
                 appName = appNameValue,
                 pairingToken = pairingTokenValue,
                 deviceName = deviceNameValue,
+                capabilities = capabilitiesValue,
             )
         }
         try {
@@ -655,7 +664,7 @@ class ConnectionController internal constructor() {
 }
 
 /// 注册请求序列化（org.json 手写；契约字段见 RegisterDeviceRequest）。
-private fun RegisterDeviceRequest.toJson(): JSONObject {
+internal fun RegisterDeviceRequest.toJson(): JSONObject {
     val json = JSONObject()
         .put("app", app)
         .put("did", did)
@@ -666,5 +675,11 @@ private fun RegisterDeviceRequest.toJson(): JSONObject {
     appName?.let { json.put("appName", it) }
     pairingToken?.let { json.put("pairingToken", it) }
     deviceName?.let { json.put("deviceName", it) }
+    capabilities?.let { caps ->
+        json.put("capabilities", JSONObject()
+            .put("adapters", org.json.JSONArray(caps.adapters))
+            .put("instrumented", caps.instrumented)
+            .put("requestBodyTee", caps.requestBodyTee))
+    }
     return json
 }

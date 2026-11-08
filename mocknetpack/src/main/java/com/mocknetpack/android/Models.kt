@@ -95,6 +95,17 @@ internal data class CaptureSession(
 /// 心跳请求（契约 HeartbeatRequest；可选上报 sdkVersion）。
 internal data class HeartbeatRequest(val sdkVersion: String)
 
+/// SDK 能力声明（AN-10 M3a-2，契约 RegisterDeviceRequest.capabilities）：
+/// 让平台知道这台设备"能抓到什么"，设备页据此展示来源与插桩状态。
+data class SdkCapabilities(
+    /// 支持的采集来源（okhttp / httpurlconnection / business）。
+    val adapters: List<String>,
+    /// 构建期插桩是否生效（OkHttpClient 构造被织入 MockNetPack.install）。
+    val instrumented: Boolean,
+    /// 请求体是否为委托式 tee（不重建、不改变报文形态）。
+    val requestBodyTee: Boolean = true,
+)
+
 /// 设备注册请求（契约 RegisterDeviceRequest；可选 pairingToken/deviceName）。
 internal data class RegisterDeviceRequest(
     val app: String,
@@ -109,6 +120,8 @@ internal data class RegisterDeviceRequest(
     val pairingToken: String? = null,
     /// 扫码自动注册时的设备显示名（可选）。
     val deviceName: String? = null,
+    /// SDK 能力声明（可选；老 SDK 不传，服务端按未知处理）。
+    val capabilities: SdkCapabilities? = null,
 )
 
 /// 设备注册响应（契约 RegisterDeviceResponse）。

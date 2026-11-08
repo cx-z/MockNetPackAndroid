@@ -91,6 +91,17 @@ object MockNetPack {
     /// 已注入过的 Builder（弱引用，避免持有宿主 builder）。`install` 按 builder 幂等：
     /// 宿主显式 install + 插件在 `OkHttpClient(Builder)` 构造处织入 install 时，
     /// 同一次构建只加一份拦截器，不会双份上报（AN-10 M3a-1 硬要求）。
+    /// 构建期插桩是否生效（AN-10 M3a-2 capabilities）：`install` 若由
+    /// `okhttp3.OkHttpClient.<init>` 的栈帧触发，说明插件织入成功。
+    private val pluginInstrumented = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /// SDK 能力声明（随注册上报，平台设备页展示"能抓到什么"）。
+    internal val capabilities: com.mocknetpack.android.SdkCapabilities
+        get() = com.mocknetpack.android.SdkCapabilities(
+            adapters = listOf("okhttp", "httpurlconnection", "business"),
+            instrumented = pluginInstrumented.get(),
+        )
+
     private val installedBuilders =
         java.util.Collections.synchronizedMap(
             java.util.WeakHashMap<okhttp3.OkHttpClient.Builder, Boolean>(),
@@ -113,6 +124,10 @@ object MockNetPack {
         try {
             val sdk = singletonInterceptor
             builder.addInterceptor(decorator?.invoke(sdk) ?: sdk)
+            // 首次 install 时判断调用来源：来自 OkHttpClient 构造 = 插件织入生效。
+            if (!pluginInstrumented.get()) {
+                pluginInstrumented.set(calledFromOkHttpClientConstructor())
+            }
             com.mocknetpack.android.internal.log.SDKLogger.info(
                 "interceptor installed (v$VERSION, decorator=${decorator != null})",
                 category = "install",
@@ -223,6 +238,7 @@ object MockNetPack {
                 appName = hostAppName(),
                 sdkVersion = VERSION,
                 osVersion = android.os.Build.VERSION.RELEASE ?: "",
+                capabilities = capabilities,
                 logHandler = null,
             )
         }
@@ -256,6 +272,7 @@ object MockNetPack {
             appName = hostAppName(),
             sdkVersion = VERSION,
             osVersion = android.os.Build.VERSION.RELEASE ?: "",
+            capabilities = capabilities,
             logHandler = logHandler,
         )
     }
@@ -358,3 +375,13 @@ object MockNetPack {
         if (pendingScanCallback != null) deliverScanResult(error)
     }
 }
+
+/// install 是否由 OkHttpClient 的构造栈帧触发（插件织入的判据）。
+private fun calledFromOkHttpClientConstructor(): Boolean =
+    try {
+        Throwable().stackTrace.any {
+            it.className == "okhttp3.OkHttpClient" && it.methodName == "<init>"
+        }
+    } catch (_: Throwable) {
+        false
+    }
