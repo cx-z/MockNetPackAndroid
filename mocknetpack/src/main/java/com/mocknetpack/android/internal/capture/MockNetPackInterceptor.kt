@@ -54,16 +54,17 @@ class MockNetPackInterceptor : Interceptor {
         if (scheme != "http" && scheme != "https") return chain.proceed(original)
         if (original.header(MockNetPack.SKIP_HEADER) != null) return chain.proceed(original)
 
-        // 2) 请求体快照（serve 与转发共用；可读一次，转发前重建保证不丢 body）。
         val startNs = System.nanoTime()
-        val requestBodySnapshot = snapshotRequestBody(original)
 
-        // 3) AN-9: Mock 匹配优先（命中 → serve 合成回包，不访问真实网络）。
+        // 2) AN-9: Mock 匹配优先（命中 → serve 合成回包，不访问真实网络）。
         //    门闩接管期（capturing 或 启动缓冲）均匹配——启动握手期用上次同步的
         //    磁盘快照即可命中（AN-9 快照持久化）；快照为空（从未同步 / 断连保护
         //    已清空）→ match 返回 null → 走真实网络（fail-open A）。
         val mock = MockRuleController.match(original.method(), original.url().encodedPath())
         if (mock != null) {
+            // 命中即短路，不转发真实网络：这里读一次 body 用于记录是安全的（不会二次消费
+            // 已发出的请求），且 mock 命中的条目需要完整请求体做上下文。
+            val requestBodySnapshot = snapshotRequestBody(original)
             // M15：media 规则（大图）先阻塞取 blob——成功则回放原始字节；失败
             // （断网/404/尺寸不符）记一条带 error 的命中流量后 fail-open 继续转发
             // 真实请求，业务侧与「未命中规则」一致，绝不静默吞掉。
@@ -80,18 +81,13 @@ class MockNetPackInterceptor : Interceptor {
             }
         }
 
-        // 转发：重建 body（快照字节）并去掉 SDK 跳过标记（不发给真实服务器）。
-        // 注意：GET/HEAD 等无 body 请求不得重建 body（OkHttp 拒绝 GET+body）。
+        // 转发：请求体改为委托式 tee（AN-10 M3a-0）——不读全量、不重建，
+        // 原 body 原样交给 OkHttp，写路径上边写边抄样本；同时去掉 SDK 跳过标记。
+        // 注意：GET/HEAD 等无 body 请求直接传 null（OkHttp 拒绝 GET+body）。
+        val teeBody = original.body()?.let { TeeRequestBody(it, MockNetPack.BODY_LIMIT_BYTES) }
         val forwarded = original.newBuilder()
             .removeHeader(MockNetPack.SKIP_HEADER)
-            .method(
-                original.method(),
-                if (original.body() != null) {
-                    RequestBody.create(original.body()?.contentType(), requestBodySnapshot)
-                } else {
-                    null
-                },
-            )
+            .method(original.method(), teeBody)
             .build()
 
         val response: Response
@@ -102,11 +98,9 @@ class MockNetPackInterceptor : Interceptor {
             HttpExchangeRecorder.record(
                 requestExchange(
                     request = original,
-                    requestBody = RequestBodyRecord(
-                        sampleBytes = requestBodySnapshot,
-                        fullSize = requestBodySnapshot.size.toLong(),
-                        unavailable = false,
-                    ),
+                    requestBody = teeBody?.let {
+                        RequestBodyRecord(it.recordedBytes(), it.recordedSize(), false)
+                    } ?: RequestBodyRecord(ByteArray(0), 0, false),
                     startNs = startNs,
                     statusCode = null,
                     responseHeaders = null,
@@ -124,9 +118,9 @@ class MockNetPackInterceptor : Interceptor {
         // 链入口 original —— 记录点早于下游补头正是"请求头为空"的根因。
         // 记录为"响应侧关联请求"，不承诺底层字节级抓包（不覆盖重定向中间过程）。
         val selected = response.networkResponse()?.request() ?: response.request()
-        // 请求体：仅当 selected.body() 与 SDK 自建转发体是同一实例（可重复读）
-        // 时才做快照；被下游替换的一次性/流式体标记 unavailable，不二次消费。
-        val selectedBody = snapshotSelectedBody(selected, forwarded, requestBodySnapshot)
+        // 请求体：仅当 selected.body() 与 SDK 的 tee 体是同一实例时才取样本；
+        // 被下游替换的一次性/流式体标记 unavailable，不二次消费、不重读。
+        val selectedBody = snapshotSelectedBody(selected, forwarded, teeBody)
 
         // 4) 响应体 tee 采集：body 消费完成（EOF 或 close）时组装条目。
         //    不整体缓冲大响应；录制缓冲上限 1MB。
@@ -344,8 +338,8 @@ class MockNetPackInterceptor : Interceptor {
     internal fun decodedBody(data: ByteArray?, contentType: String?, isRequest: Boolean): String? =
         HttpExchangeRecorder.decodedBody(data, contentType, isRequest)
 
-    /// 请求体快照：读一次并返回字节（转发用快照重建，保证不丢 body）。
-    /// AN-10 M3a-0 会改为委托式 TeeRequestBody（此处保持 M1 行为不变）。
+    /// 请求体快照：仅用于 **mock 命中短路** 路径（不转发，读一次安全）。
+    /// 真实转发路径改用 [TeeRequestBody]，不再全量读取 + 重建。
     private fun snapshotRequestBody(request: Request): ByteArray {
         val body = request.body() ?: return ByteArray(0)
         val buffer = Buffer()
@@ -370,22 +364,20 @@ class MockNetPackInterceptor : Interceptor {
         val unavailable: Boolean,
     )
 
-    /// AN7：响应后对选定请求体做安全快照（有上限，仅记录展示，绝不重建发送）。
-    /// 仅当 selected.body() 与 SDK 自建转发体（forwarded.body()）是同一实例时，
-    /// 才确认可重复读：forwarded.body() 是 SDK 用 requestBodySnapshot 字节数组
-    /// 构建的背衬体（RequestBody.create(byte[])），同一实例即字节可证明相同，
-    /// 直接复用入口快照，避免对大 body 做第二次全量重读（F2）。
-    /// 否则不触碰、不二次消费，标记 unavailable —— 覆盖一次性 / 流式 / 被下游
-    /// 替换的请求体。
+    /// AN-10 M3a-0：响应完成后取"实际发出的请求体"样本。
+    /// 仅当 selected.body() 与 SDK 的 tee 体是同一实例时，说明本次发送确实经过
+    /// TeeRequestBody，样本可信；否则（下游替换成一次性 / 流式 / 重新签名体）
+    /// 不触碰、不二次消费，标记 unavailable。
+    /// tee 的样本在 writeTo 时同步落盘，此处只读取，不再对 body 做任何 IO。
     private fun snapshotSelectedBody(
         selected: Request,
         forwarded: Request,
-        snapshotBytes: ByteArray,
+        tee: TeeRequestBody?,
     ): RequestBodyRecord {
         val body = selected.body()
         if (body == null) return RequestBodyRecord(ByteArray(0), 0, false)
-        if (body !== forwarded.body()) return RequestBodyRecord(ByteArray(0), 0, true)
-        return RequestBodyRecord(snapshotBytes, snapshotBytes.size.toLong(), false)
+        if (tee == null || body !== forwarded.body()) return RequestBodyRecord(ByteArray(0), 0, true)
+        return RequestBodyRecord(tee.recordedBytes(), tee.recordedSize(), false)
     }
 
     /// 头字典（保留原始大小写，对齐 iOS allHTTPHeaderFields 与 Web 展示习惯；
