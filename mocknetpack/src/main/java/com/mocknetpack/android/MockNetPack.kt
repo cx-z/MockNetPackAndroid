@@ -85,6 +85,80 @@ object MockNetPack {
     fun interceptor(): okhttp3.Interceptor = MockNetPackInterceptor()
 
     /**
+     * HttpURLConnection 采集入口（AN-10 M2）：包一层再返回同一个语义的连接。
+     *
+     * 接入方式（两行）：
+     * ```kotlin
+     * val raw = URL(url).openConnection() as HttpURLConnection
+     * val conn = MockNetPack.wrap(raw)   // 先 wrap，再设置请求属性 / 写 body
+     * ```
+     *
+     * 语义保证：
+     * - SDK 未接管（无有效会话、也不在启动暂存期）→ 原样返回，零开销；
+     * - 接管时返回包装实例：请求体边写边抄样本、响应体边读边抄样本，都不缓冲
+     *   全量、不改变字节，调用方读写到的内容与未包装时一致；
+     * - 只在首个终止事件（读完 EOF / close / disconnect / 连接失败）上报一条
+     *   记录，重复调用不会重复上报（adapter=`httpurlconnection`）。
+     *
+     * 注意：包装实例是 `HttpURLConnection` 子类，`is HttpsURLConnection` 判断
+     * 会失效；Go 侧 `openConnection()` 覆盖不到的库内部连接仍需各自接入。
+     */
+    @JvmStatic
+    fun wrap(connection: java.net.HttpURLConnection): java.net.HttpURLConnection =
+        com.mocknetpack.android.internal.capture.UrlConnectionCapture.wrap(connection)
+
+    /**
+     * 同 [wrap]，但显式指定来源标识（默认 `httpurlconnection`）。
+     * 业务把同一个包装器复用到自研栈时，可用自定义值（如 `cronet`）区分来源。
+     */
+    @JvmStatic
+    fun wrap(connection: java.net.HttpURLConnection, adapter: String): java.net.HttpURLConnection =
+        com.mocknetpack.android.internal.capture.UrlConnectionCapture.wrap(connection, adapter)
+
+    /**
+     * 业务自报一条 HTTP 交换（AN-10 D4a 的 `business` 来源）：供 SDK 无法注入的
+     * 栈（Cronet / 自研长连接 / 三方 SDK 内部 client）在拿到请求响应后主动上报。
+     *
+     * 只在 SDK 接管期（有效会话或启动暂存）生效，其余情况静默丢弃；上报字段
+     * 与抓包条目同构（body 走同一套 1MB 采样与 base64 规则），adapter 默认
+     * `business`。该 API 不参与 Mock 匹配，只做采集。
+     */
+    @JvmOverloads
+    @JvmStatic
+    fun reportHttp(
+        method: String,
+        url: String,
+        requestHeaders: Map<String, List<String>> = emptyMap(),
+        requestBody: ByteArray? = null,
+        statusCode: Int? = null,
+        responseHeaders: Map<String, List<String>> = emptyMap(),
+        responseBody: ByteArray? = null,
+        durationMs: Int = 0,
+        error: String? = null,
+        adapter: String = "business",
+    ) {
+        val generation = com.mocknetpack.android.internal.capture.TrafficCaptureController
+            .httpCaptureGeneration ?: return
+        com.mocknetpack.android.internal.capture.HttpExchangeRecorder.record(
+            com.mocknetpack.android.internal.capture.CapturedExchange(
+                method = method,
+                url = url,
+                requestHeaders = requestHeaders,
+                requestBodySample = requestBody,
+                requestBodyFullSize = requestBody?.size?.toLong() ?: 0,
+                statusCode = statusCode,
+                responseHeaders = responseHeaders,
+                responseBodySample = responseBody,
+                responseBodyFullSize = responseBody?.size?.toLong() ?: 0,
+                error = error,
+                durationMs = durationMs,
+                adapter = adapter.ifBlank { "business" },
+            ),
+            generation,
+        )
+    }
+
+    /**
      * 无参启动：读取扫码连接持久化的服务器地址直连（DIDStore 设备标识复用）。
      * 幂等：已在运行则忽略。
      *
