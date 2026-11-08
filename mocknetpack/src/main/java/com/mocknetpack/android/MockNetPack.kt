@@ -23,7 +23,9 @@ import com.mocknetpack.android.internal.store.ServerAddressStore
 object MockNetPack {
 
     /// SDK 版本号（发布版本；接入方通过 GitHub/JitPack 按版本号集成）。
-    const val VERSION = "1.0.0"
+    /// 与 `gradle.properties` 的 version 严格一致（AN-10 P0 对齐：运行时 1.0.1 = 发布 1.0.1）；
+    /// 插件版本同样取此值，禁止混用。
+    const val VERSION = "1.0.1"
 
     /// SDK 自身请求的跳过标记 header（对齐 iOS X-MockNetPack-Skip）。
     const val SKIP_HEADER = "X-MockNetPack-Skip"
