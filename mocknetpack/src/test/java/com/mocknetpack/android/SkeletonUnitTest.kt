@@ -12,7 +12,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/// 骨架阶段单测：已实现的纯函数单元（QR 协议解析、gzip 编解码）。
+/// 验证 QR 协议解析和 gzip 编解码。
 class SkeletonUnitTest {
 
     // MARK: - QRConnectParser（从 iOS 移植）

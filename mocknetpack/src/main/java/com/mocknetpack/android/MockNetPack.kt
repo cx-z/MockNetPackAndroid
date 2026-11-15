@@ -23,8 +23,7 @@ import com.mocknetpack.android.internal.store.ServerAddressStore
 object MockNetPack {
 
     /// SDK 版本号（发布版本；接入方通过 GitHub/JitPack 按版本号集成）。
-    /// 与 `gradle.properties` 的 version 严格一致（AN-10 P0 对齐：运行时 1.0.1 = 发布 1.0.1）；
-    /// 插件版本同样取此值，禁止混用。
+    /// 与 `gradle.properties` 的 version 及插件版本保持一致。
     const val VERSION = "1.0.1"
 
     /// SDK 自身请求的跳过标记 header（对齐 iOS X-MockNetPack-Skip）。
@@ -84,65 +83,63 @@ object MockNetPack {
      */
     fun interceptor(): okhttp3.Interceptor = singletonInterceptor
 
-    /// 单例拦截器（AN-10 M3a-1）：`install` / 手动 `addInterceptor` 共用同一实例，
+    /// 单例拦截器：`install` / 手动 `addInterceptor` 共用同一实例，
     /// 避免每次 `interceptor()` 都 new 一个（同一 client 被重复注入时也不会多份状态）。
     private val singletonInterceptor: okhttp3.Interceptor by lazy { MockNetPackInterceptor() }
 
-    /// 已注入过的 Builder（弱引用，避免持有宿主 builder）。`install` 按 builder 幂等：
-    /// 宿主显式 install + 插件在 `OkHttpClient(Builder)` 构造处织入 install 时，
-    /// 同一次构建只加一份拦截器，不会双份上报（AN-10 M3a-1 硬要求）。
-    /// 构建期插桩是否生效（AN-10 M3a-2 capabilities）：`install` 若由
-    /// `okhttp3.OkHttpClient.<init>` 的栈帧触发，说明插件织入成功。
+    /// 只有实际执行织入入口并确认 Builder 已装入 SDK 拦截器才置为 true。
     private val pluginInstrumented = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    /// SDK 能力声明（随注册上报，平台设备页展示"能抓到什么"）。
-    internal val capabilities: com.mocknetpack.android.SdkCapabilities
-        get() = com.mocknetpack.android.SdkCapabilities(
+    /// 注册时读取当前进程的能力声明。覆盖范围通过实际请求单独验证。
+    internal val capabilities: SdkCapabilities
+        get() = SdkCapabilities(
             adapters = listOf("okhttp", "httpurlconnection", "business"),
             instrumented = pluginInstrumented.get(),
         )
 
-    private val installedBuilders =
-        java.util.Collections.synchronizedMap(
-            java.util.WeakHashMap<okhttp3.OkHttpClient.Builder, Boolean>(),
-        )
-
-    /// 供插桩插件在 `OkHttpClient(Builder)` 构造入口调用：给该 builder 注入采集拦截器。
-    ///
-    /// - 幂等：同一个 Builder 多次 install 只生效一次（宿主显式调用 + 插件织入不重复）；
-    /// - [decorator] 可选：宿主用自己的拦截器包住 SDK 拦截器（如解码/Mock 之外的
-    ///   业务加解密），SDK 仍在内层，语义与手动 `addInterceptor(Crypto(interceptor()))`
-    ///   一致；
-    /// - fail-open：任何异常只打日志，不影响宿主构建 client。
+    /// 显式接入保留业务装饰器，派生 Builder 复制拦截器时也保留 SDK 标识。
     @JvmOverloads
     @JvmStatic
     fun install(
         builder: okhttp3.OkHttpClient.Builder,
         decorator: ((okhttp3.Interceptor) -> okhttp3.Interceptor)? = null,
     ) {
-        if (installedBuilders.put(builder, true) != null) return
-        try {
-            val sdk = singletonInterceptor
-            builder.addInterceptor(decorator?.invoke(sdk) ?: sdk)
-            // 首次 install 时判断调用来源：来自 OkHttpClient 构造 = 插件织入生效。
-            if (!pluginInstrumented.get()) {
-                pluginInstrumented.set(calledFromOkHttpClientConstructor())
+        installCapture(builder, decorator)
+    }
+
+    /// 供构建期插件在 OkHttp 构造器中调用，独立于手工安装和流量观测。
+    @JvmStatic
+    fun installFromInstrumentation(builder: okhttp3.OkHttpClient.Builder) {
+        if (installCapture(builder, null) && pluginInstrumented.compareAndSet(false, true)) {
+            runCatching {
+                com.mocknetpack.android.internal.log.SDKLogger.info(
+                    "woven OkHttp constructor observed", category = "install",
+                )
             }
-            com.mocknetpack.android.internal.log.SDKLogger.info(
-                "interceptor installed (v$VERSION, decorator=${decorator != null})",
-                category = "install",
+        }
+    }
+
+    private fun installCapture(
+        builder: okhttp3.OkHttpClient.Builder,
+        decorator: ((okhttp3.Interceptor) -> okhttp3.Interceptor)?,
+    ): Boolean {
+        return try {
+            com.mocknetpack.android.internal.capture.OkHttpCaptureInstall.install(
+                builder, singletonInterceptor, decorator,
             )
-        } catch (t: Throwable) {
-            installedBuilders.remove(builder)
-            com.mocknetpack.android.internal.log.SDKLogger.warn(
-                "install failed, skip instrumentation: ${t.javaClass.simpleName}",
-                category = "install",
-            )
+            true
+        } catch (e: Throwable) {
+            runCatching {
+                com.mocknetpack.android.internal.log.SDKLogger.warn(
+                    "OkHttp capture install failed: ${e.javaClass.simpleName}", category = "install",
+                )
+            }
+            false
         }
     }
 
     /**
-     * HttpURLConnection 采集入口（AN-10 M2）：包一层再返回同一个语义的连接。
+     * HttpURLConnection 采集入口：包一层再返回同一个语义的连接。
      *
      * 接入方式（两行）：
      * ```kotlin
@@ -173,7 +170,7 @@ object MockNetPack {
         com.mocknetpack.android.internal.capture.UrlConnectionCapture.wrap(connection, adapter)
 
     /**
-     * 业务自报一条 HTTP 交换（AN-10 D4a 的 `business` 来源）：供 SDK 无法注入的
+     * 业务自报一条 HTTP 交换：供 SDK 无法注入的
      * 栈（Cronet / 自研长连接 / 三方 SDK 内部 client）在拿到请求响应后主动上报。
      *
      * 只在 SDK 接管期（有效会话或启动暂存）生效，其余情况静默丢弃；上报字段
@@ -203,13 +200,15 @@ object MockNetPack {
                 requestHeaders = requestHeaders,
                 requestBodySample = requestBody,
                 requestBodyFullSize = requestBody?.size?.toLong() ?: 0,
+                requestBodyContentType = requestHeaders.entries.firstOrNull { it.key.equals("Content-Type", true) }?.value?.firstOrNull(),
                 statusCode = statusCode,
                 responseHeaders = responseHeaders,
                 responseBodySample = responseBody,
                 responseBodyFullSize = responseBody?.size?.toLong() ?: 0,
+                responseBodyContentType = responseHeaders.entries.firstOrNull { it.key.equals("Content-Type", true) }?.value?.firstOrNull(),
                 error = error,
                 durationMs = durationMs,
-                adapter = adapter.ifBlank { "business" },
+                adapter = com.mocknetpack.android.internal.capture.HttpExchangeRecorder.sourceLabel(adapter, "business"),
             ),
             generation,
         )
@@ -238,7 +237,7 @@ object MockNetPack {
                 appName = hostAppName(),
                 sdkVersion = VERSION,
                 osVersion = android.os.Build.VERSION.RELEASE ?: "",
-                capabilities = capabilities,
+                capabilitiesProvider = { capabilities },
                 logHandler = null,
             )
         }
@@ -272,7 +271,7 @@ object MockNetPack {
             appName = hostAppName(),
             sdkVersion = VERSION,
             osVersion = android.os.Build.VERSION.RELEASE ?: "",
-            capabilities = capabilities,
+            capabilitiesProvider = { capabilities },
             logHandler = logHandler,
         )
     }
@@ -375,13 +374,3 @@ object MockNetPack {
         if (pendingScanCallback != null) deliverScanResult(error)
     }
 }
-
-/// install 是否由 OkHttpClient 的构造栈帧触发（插件织入的判据）。
-private fun calledFromOkHttpClientConstructor(): Boolean =
-    try {
-        Throwable().stackTrace.any {
-            it.className == "okhttp3.OkHttpClient" && it.methodName == "<init>"
-        }
-    } catch (_: Throwable) {
-        false
-    }

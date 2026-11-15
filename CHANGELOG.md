@@ -17,9 +17,9 @@ MockNetPack Android Debug SDK（`mocknetpack`）+ 构建期插桩插件（`mockn
 ### 构建期插桩插件（`mocknetpack-instrument`，id `com.mocknetpack.android.instrument`）
 
 - **默认开启**，仅 `debuggable` 且非 `preview` 变体；织入点固定为 `okhttp3.OkHttpClient.<init>(Lokhttp3/OkHttpClient$Builder;)V`（`super()` 之后、`interceptors` 拷贝之前），是 `new OkHttpClient()` 与 `Builder.build()` 的共同收敛点。
-- **fail-open**：非 Android 工程 / AGP 不兼容 / 类缺失 / ASM 异常 → WARN 跳过，构建继续；注入调用包 `try/catch (Throwable)`，SDK 类不存在也不影响业务构造。
+- **fail-open**：不兼容配置告警跳过，执行期 transform 失败可关闭插桩重建。运行时注入调用包 `try/catch (Throwable)`。
 - **kill switch**：`-Pmocknetpack.instrument=false` 或 `mocknetpack { enabled = false }`。
-- **三级可见性**：构建日志（变体启停/织入点/耗时，宿主 `org.gradle.logging.level=warn` 时需 `-i`）；运行时自检（会话开始 5 s 内无拦截 → WARN `instrumented=false`）；平台设备页 `capabilities.instrumented`。
+- **三级可见性**：构建日志和 APK 字节码验证织入。运行时分别记录织入入口与首次业务流量，设备页显示注册时的织入观测。
 - **发布形态**：JitPack 多模块配置（AAR + 插件标记），`selfContainedJar`（classifier `all`）把插件类与 ASM 打成单 jar，宿主只引一个文件即可 apply。
 
 ### 契约与平台
@@ -29,5 +29,5 @@ MockNetPack Android Debug SDK（`mocknetpack`）+ 构建期插桩插件（`mockn
 
 ### 版本与兼容
 
-- `MockNetPack.VERSION` 与 `gradle.properties` 对齐为 1.0.1；AAR 元数据版本显式锁 `-Xmetadata-version=1.9.0`（宿主 Kotlin 1.8.10 只能读 ≤1.9.0 的元数据）。
+- `MockNetPack.VERSION` 与 `gradle.properties` 对齐为 1.0.1；AAR 元数据锁定为 1.9.0，Kotlin API 目标为 1.8，使生成的协程字节码兼容 Dokimo 的运行时。
 - OkHttp 3.12.8 / Okio 1.14.0 基线；`RequestBody` 无 `isOneShot()` / `isDuplex()`，`TeeRequestBody` 不 override 这两个方法。

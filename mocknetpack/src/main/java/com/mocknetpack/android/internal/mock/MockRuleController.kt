@@ -15,15 +15,15 @@ import org.json.JSONObject
  * 本地 Mock 规则控制器（对齐 iOS MockRuleController）：持有当前生效规则
  * 快照，供 MockNetPackInterceptor 匹配回包。
  *
- * 语义（需求 6.5/6.6 + 决策 E1/fail-open A + AN-9 启动期 Mock）：
+ * 规则匹配与快照行为：
  * - 快照来自心跳后按 `rulesVersion` 增量拉取 `GET .../mock-rules?sinceVersion=`。
  *   仅服务端 effective=true 的规则会被下发并参与匹配（契约保证，SDK 不重复过滤）。
  * - 匹配键 = Method（大小写不敏感）+ URL 路径（不含 Query/Body）；不区分 host。
  * - **fail-open A**：从未拉到快照时拉取失败 → 不 Mock，走真实网络；
  *   已有快照后本次拉取失败 → 沿用旧快照继续 Mock。
- * - **AN-9 快照持久化**：同步成功的快照落盘（MockRuleSnapshotStore）；冷启动懒加载，
+ * - **快照持久化**：同步成功的快照落盘（MockRuleSnapshotStore）；冷启动懒加载，
  *   使启动握手期（规则下载前）的业务请求也能命中上次同步的快照。
- * - **AN-9 断连保护**：连接失败达阈值 / 永久拒绝时 `clearSnapshot()` 清空内存+磁盘，
+ * - **断连保护**：连接失败达阈值 / 永久拒绝时 `clearSnapshot()` 清空内存+磁盘，
  *   连接恢复后以 sinceVersion=0 重新从服务端下载（旧快照不恢复）。
  * - 规则跨会话保留；Interceptor 的接管判定跟随门闩（capturing 或 启动缓冲），
  *   idle 时本控制器即便有快照也不会被询问。
@@ -47,7 +47,7 @@ object MockRuleController {
     @Volatile
     private var loaded = false
 
-    // MARK: - 快照加载与持久化（AN-9）
+    // MARK: - 快照加载与持久化
 
     /// 首次使用前从磁盘加载快照（幂等；失败则保持空快照，不 Mock）。
     /// 整个 构造→加载→解析→赋值 在锁内完成：与 `clearSnapshot()`（同锁）
@@ -92,7 +92,7 @@ object MockRuleController {
     /// 清空后 match 必返回 null → 不再 Mock；连接恢复后 syncIfNeeded 以
     /// sinceVersion=0 重新从服务端下载全量规则（用户决策：旧快照不恢复）。
     /// 内存 + 磁盘清除均持锁：与 ensureLoaded()（锁内加载+解析+赋值）互斥，
-    /// 杜绝「清内存后、清磁盘前」窗口内读回旧盘导致规则复活（D2 硬化）。
+    /// 杜绝「清内存后、清磁盘前」窗口内读回旧盘导致规则复活。
     /// SharedPreferences apply() 为异步写（内存 map 立即更新），锁内毫秒级，
     /// 且 clearSnapshot 仅断连保护/永久拒绝低频路径调用，可接受。
     internal fun clearSnapshot() {
@@ -222,7 +222,7 @@ object MockRuleController {
             bodyBase64 = json.optString("bodyBase64").takeIf { !json.isNull("bodyBase64") },
             // 服务端 omitempty：仅 delayMs>0 时下发；缺 key/0/null 一律视为无延迟。
             delayMs = json.optInt("delayMs").takeIf { json.has("delayMs") && !json.isNull("delayMs") && it > 0 },
-            // M15：大图规则只带 media 引用（老服务端无该字段 → null，走原路径）。
+            // 大图规则只带 media 引用（老服务端无该字段 → null，走原路径）。
             media = json.optJSONObject("media")?.let { m ->
                 MediaRef(
                     sha256 = m.optString("sha256"),
@@ -233,7 +233,7 @@ object MockRuleController {
         )
     }
 
-    // MARK: - AN-9 快照序列化（持久化用；字段对齐契约 MockRule，ruleId 不落盘）
+    // MARK: - 快照序列化（持久化用；字段对齐契约 MockRule，ruleId 不落盘）
 
     /// 规则集 → JSON 数组（供 MockRuleSnapshotStore 持久化）。
     internal fun rulesToJsonArray(rules: List<MockRule>): JSONArray {
@@ -252,7 +252,7 @@ object MockRuleController {
         r.response.body?.let { resp.put("body", it) }
         r.response.bodyBase64?.let { resp.put("bodyBase64", it) }
         r.response.delayMs?.let { resp.put("delayMs", it) }
-        // M15：快照持久化必须带上 media，否则冷启动回放会退化成空 body。
+        // 快照持久化必须带上 media，否则冷启动回放会退化成空 body。
         r.response.media?.let { m ->
             resp.put(
                 "media",

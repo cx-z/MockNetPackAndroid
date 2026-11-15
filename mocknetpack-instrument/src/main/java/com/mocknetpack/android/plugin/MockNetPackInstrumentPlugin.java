@@ -17,9 +17,9 @@ import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
 /**
- * MockNetPack 构建期插桩插件（AN-10 M3a-1）。
+ * MockNetPack 构建期插桩插件。
  *
- * 目的：把 {@code MockNetPack.install(builder)} 织入 {@code okhttp3.OkHttpClient}
+ * 目的：把 {@code MockNetPack.installFromInstrumentation(builder)} 织入 {@code okhttp3.OkHttpClient}
  * 的构造入口 {@code <init>(Lokhttp3/OkHttpClient$Builder;)V}，让宿主/三方库里
  * 所有经 Builder 构建的 OkHttpClient 自动携带采集拦截器（业务零改动）。
  *
@@ -137,7 +137,7 @@ public class MockNetPackInstrumentPlugin implements Plugin<Project> {
         }
     }
 
-    /** 在 super() 之后插入 try { MockNetPack.install(builder) } catch (Throwable) {}。 */
+    /** 在 super() 之后插入 try { MockNetPack.installFromInstrumentation(builder) } catch (Throwable) {}。 */
     static final class OkHttpClientClassVisitor extends ClassVisitor {
 
         private final int apiVersion;
@@ -194,7 +194,7 @@ public class MockNetPackInstrumentPlugin implements Plugin<Project> {
             super.visitMethodInsn(
                     Opcodes.INVOKESTATIC,
                     MockNetPackClassVisitorFactory.SDK_INTERNAL,
-                    "install",
+                    "installFromInstrumentation",
                     MockNetPackClassVisitorFactory.CTOR_DESC,
                     false);
             super.visitLabel(end);

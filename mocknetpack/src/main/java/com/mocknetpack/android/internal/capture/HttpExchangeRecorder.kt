@@ -5,7 +5,7 @@ import com.mocknetpack.android.TrafficEntry
 import com.mocknetpack.android.internal.util.SDKBase64
 
 /**
- * 统一的 HTTP 交换快照（AN-10 M1）。
+ * 统一的 HTTP 交换快照。
  *
  * 刻意**不含任何 OkHttp / HttpURLConnection 类型**：各接入面（OkHttp 拦截器、
  * HttpURLConnection 包装器、业务自报 `reportHttp`）把各自栈里拿到的数据组装成
@@ -13,7 +13,7 @@ import com.mocknetpack.android.internal.util.SDKBase64
  * 这样 body 三态、1MB 截断、base64、codec 槽语义只有一份实现，新增适配器
  * 不需要复制一遍 `buildEntry/serveEntry`。
  *
- * 字段语义与历史实现逐字对齐（M1 只搬不改）：
+ * 字段语义：
  * - `requestBodySample` / `responseBodySample` 是"已采样字节"，Recorder 按
  *   [MockNetPack.BODY_LIMIT_BYTES] 截断；`*FullSize` 是原始总大小，供
  *   `[binary N bytes]` / `[truncated N bytes]` 占位使用。
@@ -56,7 +56,7 @@ internal data class CapturedExchange(
 )
 
 /**
- * HTTP 交换记录器（AN-10 M1）：把 [CapturedExchange] 组装成契约 `TrafficEntry`
+ * HTTP 交换记录器：把 [CapturedExchange] 组装成契约 `TrafficEntry`
  * 并交给既有的 [TrafficCaptureController.record] 管线（会话开关、启动暂存、
  * 攒批、失败即弃全部复用，不新增第二套上传路径）。
  *
@@ -73,6 +73,17 @@ internal object HttpExchangeRecorder {
 
     /** 业务自报（Cronet / 自研栈 / 封装层）来源。 */
     const val ADAPTER_BUSINESS = "business"
+
+    /// 来源标识与正文是否完整独立，WebKit 来源前缀由服务端保留。
+    internal fun sourceLabel(value: String?, fallback: String): String {
+        val label = value?.trim() ?: return fallback
+        if (label.isEmpty() || label.length > 32) return fallback
+        val canonical = label.lowercase()
+        if (canonical.startsWith("wkwebview-") || canonical == "urlprotocol" ||
+            canonical == ADAPTER_OKHTTP || canonical == ADAPTER_HTTP_URL_CONNECTION || canonical == ADAPTER_BUSINESS
+        ) return fallback
+        return label.takeIf { it.toByteArray(Charsets.UTF_8).size <= 32 } ?: fallback
+    }
 
     fun record(exchange: CapturedExchange, generation: Long? = null) {
         TrafficCaptureController.record(toEntry(exchange), generation)

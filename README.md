@@ -84,30 +84,36 @@ The server address comes from the pairing QR code, so business code does not nee
 
 ## Two-line plugin integration (recommended)
 
-The `mocknetpack-instrument` Gradle plugin weaves `MockNetPack.install(builder)` into every `okhttp3.OkHttpClient(Builder)` constructor at build time, so clients created by libraries (image loaders, downloaders, ad SDKs) are captured without touching their code.
+The `mocknetpack-instrument` Gradle plugin weaves `MockNetPack.installFromInstrumentation(builder)` into every `okhttp3.OkHttpClient(Builder)` constructor at build time, so clients created by libraries (image loaders, downloaders, ad SDKs) are captured without touching their code.
 
 ```groovy
-// app/build.gradle — top of file, in buildscript { repositories { mavenLocal(); google(); mavenCentral() } }
-classpath 'com.mocknetpack.android:mocknetpack-instrument:1.0.1'   // or the JitPack coordinate
+// app/build.gradle — in buildscript { dependencies { ... } }
+classpath files('libs/debug/mocknetpack-instrument-1.0.1-all.jar')
 // after `apply plugin: 'com.android.application'`
 apply plugin: 'com.mocknetpack.android.instrument'
 ```
 
+Keep this JAR and the SDK AAR from the same build. Automatically installed clients also participate in the existing Mock rules.
+
 Behavior and safety:
 
 - **Debug only.** Only `debuggable` variants that are not `preview` are instrumented; release/preview builds contain neither the weaving nor the SDK.
-- **Fail-open.** Non-Android projects, an incompatible AGP, a missing `MockNetPack` class, or any ASM error logs a warning and skips instrumentation — the build and the app keep working. The injected call is also wrapped in `try/catch (Throwable)`.
+- **Fail-open.** Unsupported configurations can skip instrumentation with a warning. If an AGP transform fails during execution, rebuild with the kill switch. The runtime call is guarded by `try/catch (Throwable)`.
 - **Kill switch.** `-Pmocknetpack.instrument=false` or `mocknetpack { enabled = false }` disables it for one build.
-- **No double reporting.** `install` is idempotent per `OkHttpClient.Builder` (`WeakHashMap`), so the plugin and your own `install(builder) { crypto }` call collapse into one interceptor.
-- **Self-check.** If no interception happens within 5 s after a capture session starts, the SDK logs `instrumented=false` (a strong hint that the plugin was not applied).
+- **No double reporting.** The plugin recognizes an installed SDK interceptor or decorated SDK interceptor, including when `newBuilder()` copies it.
+- **Runtime evidence.** The SDK logs the first execution of its woven hook and the first eligible business OkHttp request separately. Check target library requests to validate coverage.
 - **Build log.** With `-i`: `[mocknetpack] instrumentation enabled for variant '...'` / `variant '...' skipped: debug-only instrumentation`.
 
 ### HttpURLConnection and self-reported traffic
 
 ```kotlin
 // HttpURLConnection (only captured while a session is active; no Mock here)
-val conn = URL(url).openConnection() as HttpURLConnection
-MockNetPack.wrap(conn)
+val conn = MockNetPack.wrap(URL(url).openConnection() as HttpURLConnection)
+try {
+    conn.inputStream.use { /* read the body */ }
+} finally {
+    conn.disconnect()
+}
 
 // Self-built network stacks (Cronet, native callbacks, custom sockets)
 MockNetPack.reportHttp(
@@ -119,7 +125,7 @@ MockNetPack.reportHttp(
 
 ### 常见问题 / FAQ
 
-- **设备页显示「未插桩」** — the `capabilities.instrumented=false` badge means no `install` call ever came from an `OkHttpClient` constructor in this build: the plugin was not applied (or was disabled), or the app only calls `interceptor()`. Capture still works for clients you installed manually.
+- **设备页显示「尚未观测到插桩」** — the last registration did not report execution of the woven hook. Use APK bytecode to verify build-time weaving.
 - **插件会不会改坏报文？** — No. Only one `invoke-static` is inserted into the constructor; request/response bytes are untouched (request bodies use a delegating tee that preserves `contentLength`).
 - **会不会上报两次？** — No, see idempotency above. The same `TrafficEntry` appears once.
 - **同一条流量会不会重复出现在 Web？** — Only if the same URL is genuinely requested by two different stacks; `adapter` distinguishes them. Capture does not de-duplicate by URL on purpose.
@@ -130,7 +136,7 @@ MockNetPack.reportHttp(
 - **WebView / H5** — not instrumented in this batch (no URLProtocol equivalent).
 - **Native (NDK) HTTP stacks** — including ad SDKs that issue requests from native code; only their Java/Kotlin OkHttp layer is visible.
 - **Raw sockets / custom protocols** — unless the host reports them via `reportHttp`.
-- **Clients derived from a client that was never instrumented** — `newBuilder()` copies the interceptor list of the source client; a client built in a non-instrumented build (or by reflection) stays uncovered.
+- **OkHttp classes outside the transformed variant** — automatic installation applies to constructors that contain the woven call.
 - **Release builds** — no SDK, no capture by design.
 
 ## Server pairing and capture

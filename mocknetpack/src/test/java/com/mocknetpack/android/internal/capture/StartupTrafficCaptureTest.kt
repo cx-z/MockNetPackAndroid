@@ -27,7 +27,7 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
-/// 启动握手期流量暂存 + 采集代次归属验证（AN-8，移植 iOS StartupTrafficCaptureTests）。
+/// 启动握手期流量暂存 + 采集代次归属验证（与 iOS 启动流量测试对齐）。
 ///
 /// 覆盖：首心跳前请求不上传/首心跳晋升（顺序保持）、启动期应用 Mock 快照/不抓 SDK 请求、
 /// 首 idle 丢弃 + 旧代迟到回包作废、迟到回包归首个会话、restart 作废旧在飞、
@@ -168,7 +168,7 @@ class StartupTrafficCaptureTest {
         )
     }
 
-    /// AN-9：首次心跳前的请求命中内存快照规则 → 启动缓冲期即 Mock 回包
+    /// 首次心跳前的请求命中内存快照规则 → 启动缓冲期即 Mock 回包
     /// （不回真实网络）；带 skip 标记的 SDK 自请求仍直接放行、不抓。
     @Test
     fun `startup applies persisted mock snapshot but not sdk requests`() {

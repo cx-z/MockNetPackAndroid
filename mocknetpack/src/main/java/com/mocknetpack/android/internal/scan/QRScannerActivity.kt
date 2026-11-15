@@ -33,7 +33,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
- * AN-4 扫码界面（CameraX PreviewView + ML Kit barcode 扫描）。
+ * 扫码界面（CameraX PreviewView + ML Kit barcode 扫描）。
  *
  * 对齐 iOS QRScannerViewController 语义：
  * - 相机权限运行时请求（Android 无 AVFoundation 授权传播延迟，预授权可省，
@@ -198,6 +198,7 @@ class QRScannerActivity : ComponentActivity() {
                 sdkVersion = MockNetPack.VERSION,
                 osVersion = Build.VERSION.RELEASE ?: "",
                 clientFactory = { ConnectionClient.create(it) },
+                capabilitiesProvider = { MockNetPack.capabilities },
                 onStop = { MockNetPack.stop() },
                 onSave = { server, app -> ServerAddressStore.save(server, app) },
                 onStart = { server, app, d ->

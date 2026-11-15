@@ -8,7 +8,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/// HttpExchangeRecorder（AN-10 M1）：组装与规范化的字段映射验证。
+/// HttpExchangeRecorder：组装与规范化的字段映射验证。
 /// 覆盖文本/二进制三态、1MB 截断、`[body unavailable]` 前缀、mock 条目覆写、
 /// 以及 `adapter` 在契约 JSON 里的出现/缺省。
 class HttpExchangeRecorderTest {
@@ -142,5 +142,12 @@ class HttpExchangeRecorderTest {
         val legacy = withAdapter.copy(adapter = null)
         val legacyJson: JSONObject = TrafficCaptureController.entryJson(legacy)
         assertFalse(legacyJson.has("adapter"))
+    }
+    @Test
+    fun `custom label respects byte length and built in identifiers`() {
+        assertEquals("cronet", HttpExchangeRecorder.sourceLabel(" cronet ", "business"))
+        assertEquals("business", HttpExchangeRecorder.sourceLabel("WKWebView-fetch", "business"))
+        assertEquals("business", HttpExchangeRecorder.sourceLabel("okhttp", "business"))
+        assertEquals("business", HttpExchangeRecorder.sourceLabel("界".repeat(11), "business"))
     }
 }

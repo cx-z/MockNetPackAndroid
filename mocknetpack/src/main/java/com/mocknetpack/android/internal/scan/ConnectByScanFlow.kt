@@ -1,11 +1,14 @@
 package com.mocknetpack.android.internal.scan
 
+import com.mocknetpack.android.RegisterDeviceRequest
+import com.mocknetpack.android.SdkCapabilities
+import com.mocknetpack.android.internal.connection.toJson
+
 import com.mocknetpack.android.ConnectByScanError
 import com.mocknetpack.android.internal.connection.ConnectionClient
 import com.mocknetpack.android.internal.connection.ConnectionClientError
 import com.mocknetpack.android.internal.log.SDKLogger
 import kotlinx.coroutines.delay
-import org.json.JSONObject
 
 /**
  * 扫码连接核心流程（对齐 iOS `connectByScan(scanner:makeClient:)` 核心，
@@ -34,6 +37,7 @@ internal object ConnectByScanFlow {
         sdkVersion: String,
         osVersion: String,
         clientFactory: (String) -> ConnectionClient,
+        capabilitiesProvider: (() -> SdkCapabilities)? = null,
         probeRetryCount: Int = PROBE_RETRY_COUNT,
         probeRetryDelayMs: Long = PROBE_RETRY_DELAY_MS,
         onStop: () -> Unit,
@@ -53,15 +57,17 @@ internal object ConnectByScanFlow {
 
         // 2) 令牌注册（可达性 + 令牌校验二合一）。did 复用：与启动注册同一 did。
         val registerSucceeded = try {
-            val body = JSONObject()
-                .put("app", appID)
-                .put("did", did)
-                .put("platform", "android")
-                .put("osVersion", osVersion)
-                .put("sdkVersion", sdkVersion)
-                .put("appVersion", appVersion)
-                .put("appName", appName ?: JSONObject.NULL)
-                .put("pairingToken", payload.token)
+            val body = RegisterDeviceRequest(
+                app = appID,
+                did = did,
+                platform = "android",
+                osVersion = osVersion,
+                sdkVersion = sdkVersion,
+                appVersion = appVersion,
+                appName = appName,
+                pairingToken = payload.token,
+                capabilities = capabilitiesProvider?.invoke(),
+            ).toJson()
             client.post("devices/register", body)
             true
         } catch (e: ConnectionClientError.HttpStatus) {

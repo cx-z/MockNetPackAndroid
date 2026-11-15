@@ -50,8 +50,7 @@ class ConnectionClient private constructor(
         private val sharedLock = Any()
 
         /// 进程级共享 OkHttpClient（惰性创建、连接池复用）。
-        /// 不含任何拦截器——SDK 自身请求永不进入 MockNetPackInterceptor；
-        /// 请求恒带 skipHeader 为双保险。
+        /// 不显式安装采集拦截器；所有 SDK 请求都用 skipHeader 绕过采集和 Mock。
         private fun sharedClient(): OkHttpClient {
             sharedHttpClient?.let { return it }
             synchronized(sharedLock) {
@@ -125,7 +124,7 @@ class ConnectionClient private constructor(
     }
 
     /**
-     * 发起 GET 并返回原始字节（M15：拉取 mock 规则的 binary body blob）。
+     * 发起 GET 并返回 Mock 规则的二进制回包字节。
      *
      * 阻塞式而非协程式：调用方是 OkHttp 拦截线程（已在线程池里），再做
      * `withContext` 只会多一次切换；超时由共享 OkHttpClient 兜底。

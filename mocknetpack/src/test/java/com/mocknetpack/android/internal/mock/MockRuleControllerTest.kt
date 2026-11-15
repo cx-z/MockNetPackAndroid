@@ -297,7 +297,7 @@ class MockRuleControllerTest {
         assertNull(list.rules[1].response.delayMs)
     }
 
-    // MARK: - AN-9 快照序列化 roundtrip
+    // MARK: - 快照序列化 roundtrip
 
     @Test
     fun `rule snapshot serialization roundtrips`() {
@@ -406,7 +406,7 @@ class MockRuleControllerTest {
         )
     }
 
-    /// M15：media 引用随规则下发并被快照持久化——冷启动回放不能退化成空 body。
+    /// media 引用随规则下发并被快照持久化——冷启动回放不能退化成空 body。
     @Test
     fun `parse and serialize preserve media ref`() {
         val json = JSONObject(

@@ -24,5 +24,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "MockNetPackAndroid"
 include(":mocknetpack")
-// AN-10 M3a-1：构建期插桩插件（ASM 织入 OkHttpClient 构造，debug-only）。
+// 构建期插桩插件（ASM 织入 OkHttpClient 构造，debug-only）。
 include(":mocknetpack-instrument")

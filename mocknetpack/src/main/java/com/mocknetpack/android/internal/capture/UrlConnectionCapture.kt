@@ -7,10 +7,9 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * HttpURLConnection 采集包装器（AN-10 M2）。
+ * HttpURLConnection 采集包装器。
  *
  * 覆盖范围：业务代码显式 `openConnection()` 得到的连接，接入点在
  * [MockNetPack.wrap]（同两行接入：`conn = MockNetPack.wrap(conn)` 后再设置请求属性）。
@@ -47,8 +46,7 @@ internal object UrlConnectionCapture {
         return CaptureHttpURLConnection(
             delegate = connection,
             generation = generation,
-            adapter = adapter?.takeIf { it.isNotBlank() }
-                ?: HttpExchangeRecorder.ADAPTER_HTTP_URL_CONNECTION,
+            adapter = HttpExchangeRecorder.sourceLabel(adapter, HttpExchangeRecorder.ADAPTER_HTTP_URL_CONNECTION),
         )
     }
 }
@@ -64,7 +62,6 @@ private class CaptureHttpURLConnection(
 ) : HttpURLConnection(delegate.url) {
 
     private val startNs = System.nanoTime()
-    private val recorded = AtomicBoolean(false)
 
     private val requestSample = ByteArrayOutputStream()
     private val requestLock = Any()
@@ -74,58 +71,95 @@ private class CaptureHttpURLConnection(
     private val responseLock = Any()
     private var responseBytes = 0L
 
-    /// 请求头必须在连接建立前快照：JDK 的 `getRequestProperties()` 在已连接后抛
-    /// IllegalStateException，等到落库时再读会拿到空字典（历史"请求头为空"的同款坑）。
+    private val lifecycleLock = Any()
     private var requestHeaders: Map<String, List<String>>? = null
+    private var started = false
+    private var recorded = false
+    private var statusCode: Int? = null
+    private var responseHeaders: Map<String, List<String>>? = null
+    private var inputFailure: IOException? = null
 
     private var outputStream: OutputStream? = null
     private var inputStream: InputStream? = null
     private var errorStream: InputStream? = null
 
-    // MARK: - URLConnection 状态转发
-
     override fun connect() {
-        snapshotRequestHeaders()
+        beginNetworkAccess()
         try {
             delegate.connect()
         } catch (e: IOException) {
-            recordError(e)
+            record(e)
             throw e
         }
     }
 
     override fun disconnect() {
-        // 调用方在读完/放弃时断开：先把已观测到的一半落库，再断开底层连接。
-        record(null)
-        delegate.disconnect()
+        try {
+            delegate.disconnect()
+        } finally {
+            record()
+        }
     }
 
     override fun usingProxy(): Boolean = delegate.usingProxy()
 
-    /// 连接前快照请求头（幂等）。
-    private fun snapshotRequestHeaders() {
-        if (requestHeaders != null) return
-        requestHeaders = try {
-            delegate.requestProperties?.mapValues { (_, values) -> values?.filterNotNull() ?: emptyList() }
-        } catch (_: Exception) {
-            null
+    /// 在调用方的操作可能触发连接前取得请求头。
+    private fun beginNetworkAccess() = synchronized(lifecycleLock) {
+        if (!started) {
+            requestHeaders = runCatching {
+                delegate.requestProperties?.mapValues { (_, values) -> values?.filterNotNull() ?: emptyList() }
+            }.getOrNull()
+            started = true
         }
     }
 
-    override fun getHeaderField(name: String?): String? = delegate.getHeaderField(name)
-    override fun getHeaderField(pos: Int): String? = delegate.getHeaderField(pos)
-    override fun getHeaderFieldKey(pos: Int): String? = delegate.getHeaderFieldKey(pos)
-    override fun getHeaderFields(): Map<String, List<String>> = delegate.headerFields
-
-    override fun getResponseCode(): Int = try {
-        snapshotRequestHeaders()
-        delegate.responseCode
-    } catch (e: IOException) {
-        recordError(e)
-        throw e
+    /// 只有调用方已经取得响应时才读底层的响应头缓存。
+    private fun observeResponse(code: Int? = null) {
+        val fields = runCatching { delegate.headerFields }.getOrNull()
+        rememberResponse(fields, code)
     }
 
-    override fun getResponseMessage(): String? = delegate.responseMessage
+    private fun rememberResponse(fields: Map<out String?, List<String>?>?, code: Int? = null) {
+        val headers = LinkedHashMap<String, List<String>>()
+        var statusLineCode: Int? = null
+        for ((name, values) in fields.orEmpty()) {
+            if (name == null) {
+                statusLineCode = values?.firstOrNull()?.split(' ', limit = 3)?.getOrNull(1)?.toIntOrNull()
+            } else if (!values.isNullOrEmpty()) {
+                headers[name] = values.filterNotNull()
+            }
+        }
+        synchronized(lifecycleLock) {
+            (code ?: statusLineCode)?.takeIf { it >= 100 }?.let { statusCode = it }
+            if (fields != null) responseHeaders = headers
+        }
+    }
+
+    private inline fun <T : Any> readResponseValue(read: () -> T?): T? {
+        beginNetworkAccess()
+        return read()?.also { observeResponse() }
+    }
+
+    override fun getHeaderField(name: String?): String? = readResponseValue { delegate.getHeaderField(name) }
+    override fun getHeaderField(pos: Int): String? = readResponseValue { delegate.getHeaderField(pos) }
+    override fun getHeaderFieldKey(pos: Int): String? = readResponseValue { delegate.getHeaderFieldKey(pos) }
+
+    override fun getHeaderFields(): Map<String, List<String>> {
+        beginNetworkAccess()
+        return delegate.headerFields.also { rememberResponse(it) }
+    }
+
+    override fun getResponseCode(): Int {
+        beginNetworkAccess()
+        return try {
+            delegate.responseCode.also { if (it >= 100) observeResponse(it) }
+        } catch (e: IOException) {
+            record(e)
+            throw e
+        }
+    }
+
+    override fun getResponseMessage(): String? = readResponseValue { delegate.responseMessage }
 
     override fun getRequestMethod(): String = delegate.requestMethod
     override fun setRequestMethod(method: String?) = delegate.setRequestMethod(method)
@@ -133,10 +167,18 @@ private class CaptureHttpURLConnection(
     override fun getInstanceFollowRedirects(): Boolean = delegate.instanceFollowRedirects
     override fun setInstanceFollowRedirects(follow: Boolean) = delegate.setInstanceFollowRedirects(follow)
 
-    override fun getContentType(): String? = delegate.contentType
-    override fun getContentLength(): Int = delegate.contentLength
-    override fun getContentLengthLong(): Long = delegate.contentLengthLong
-    override fun getContentEncoding(): String? = delegate.contentEncoding
+    override fun getContentType(): String? = readResponseValue { delegate.contentType }
+    override fun getContentLength(): Int {
+        beginNetworkAccess()
+        return delegate.contentLength.also { if (it >= 0) observeResponse() }
+    }
+
+    override fun getContentLengthLong(): Long {
+        beginNetworkAccess()
+        return delegate.contentLengthLong.also { if (it >= 0) observeResponse() }
+    }
+
+    override fun getContentEncoding(): String? = readResponseValue { delegate.contentEncoding }
 
     override fun getRequestProperty(key: String?): String? = delegate.getRequestProperty(key)
     override fun setRequestProperty(key: String?, value: String?) = delegate.setRequestProperty(key, value)
@@ -171,89 +213,91 @@ private class CaptureHttpURLConnection(
 
     override fun getOutputStream(): OutputStream {
         outputStream?.let { return it }
-        snapshotRequestHeaders()
-        val stream = try {
-            delegate.outputStream
-        } catch (e: IOException) {
-            recordError(e)
-            throw e
-        }
-        val wrapped = SampleOutputStream(stream)
-        outputStream = wrapped
-        return wrapped
+        beginNetworkAccess()
+        val stream = recordOnIoFailure { delegate.outputStream }
+        return SampleOutputStream(stream).also { outputStream = it }
     }
 
     override fun getInputStream(): InputStream {
         inputStream?.let { return it }
-        snapshotRequestHeaders()
+        beginNetworkAccess()
         val stream = try {
             delegate.inputStream
         } catch (e: IOException) {
-            recordError(e)
+            // HTTP 错误也是 getInputStream 的正常异常路径，调用方可以继续读 error stream。
+            synchronized(lifecycleLock) { inputFailure = e }
+            if (runCatching { delegate.errorStream }.getOrNull() != null) observeResponse()
             throw e
         }
-        val wrapped = sampleInputStream(stream)
-        inputStream = wrapped
-        return wrapped
+        synchronized(lifecycleLock) { inputFailure = null }
+        observeResponse()
+        return sampleInputStream(stream).also { inputStream = it }
     }
 
     override fun getErrorStream(): InputStream? {
         errorStream?.let { return it }
-        snapshotRequestHeaders()
         val stream = delegate.errorStream ?: return null
-        val wrapped = sampleInputStream(stream)
-        errorStream = wrapped
-        return wrapped
+        beginNetworkAccess()
+        observeResponse()
+        return sampleInputStream(stream).also { errorStream = it }
     }
 
-    /** 响应流包装：边读边抄样本，EOF / close 落记录（幂等）。 */
+    /// 保留原异常。body 开始读写后的 I/O 异常终止当前采集。
+    private inline fun <T> recordOnIoFailure(action: () -> T): T {
+        return try {
+            action()
+        } catch (e: IOException) {
+            record(e)
+            throw e
+        }
+    }
+
     private fun sampleInputStream(stream: InputStream): InputStream =
         object : InputStream() {
-            override fun read(): Int {
+            override fun read(): Int = recordOnIoFailure {
                 val value = stream.read()
                 if (value >= 0) {
                     appendResponse(byteArrayOf(value.toByte()), 0, 1)
                 } else {
-                    record(null)
+                    record()
                 }
-                return value
+                value
             }
 
-            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int = recordOnIoFailure {
                 val n = stream.read(buffer, offset, length)
                 if (n > 0) {
                     appendResponse(buffer, offset, n)
                 } else if (n == -1) {
-                    record(null)
+                    record()
                 }
-                return n
+                n
             }
 
             override fun available(): Int = stream.available()
+
             override fun close() {
                 try {
-                    stream.close()
+                    recordOnIoFailure { stream.close() }
                 } finally {
-                    record(null)
+                    record()
                 }
             }
         }
 
-    /** 请求体输出流包装：边写边抄样本，不缓冲全量、不影响底层发送。 */
     private inner class SampleOutputStream(private val stream: OutputStream) : OutputStream() {
-
-        override fun write(b: Int) {
+        override fun write(b: Int) = recordOnIoFailure {
             stream.write(b)
             appendRequest(byteArrayOf(b.toByte()), 0, 1)
         }
 
-        override fun write(buffer: ByteArray, offset: Int, length: Int) {
+        override fun write(buffer: ByteArray, offset: Int, length: Int) = recordOnIoFailure {
             stream.write(buffer, offset, length)
             appendRequest(buffer, offset, length)
         }
 
-        override fun flush() = stream.flush()
-        override fun close() = stream.close()
+        override fun flush() = recordOnIoFailure { stream.flush() }
+        override fun close() = recordOnIoFailure { stream.close() }
     }
 
     // MARK: - 样本缓冲 + 单次落库
@@ -280,84 +324,50 @@ private class CaptureHttpURLConnection(
         }
     }
 
-    /// 落一条记录（只在首次调用生效）。`error` 非空表示连接失败。
-    private fun record(error: IOException?) {
-        if (!recorded.compareAndSet(false, true)) return
-        val responseHeaders = try {
-            buildResponseHeaders()
-        } catch (_: IOException) {
-            null
-        }
-        // 状态码尽量取到：4xx 时 getInputStream() 会抛 IOException，但 responseCode
-        // 仍可读（错误条目也应带 404/500，便于 Web 区分"请求失败"与"网络不通"）。
-        val statusCode = try {
-            delegate.responseCode
-        } catch (_: IOException) {
-            null
-        }
-        val requestBody: ByteArray
-        val requestSize: Long
-        synchronized(requestLock) {
-            requestBody = requestSample.toByteArray()
-            requestSize = requestBytes
-        }
-        val responseBody: ByteArray
-        val responseSize: Long
-        synchronized(responseLock) {
-            responseBody = responseSample.toByteArray()
-            responseSize = responseBytes
-        }
-
-        HttpExchangeRecorder.record(
-            CapturedExchange(
-                method = delegate.requestMethod,
-                url = delegate.url?.toString() ?: "",
-                requestHeaders = requestHeaders ?: try {
-                    delegate.requestProperties?.mapValues { (_, values) ->
-                        values?.filterNotNull() ?: emptyList()
-                    } ?: emptyMap()
-                } catch (_: Exception) {
-                    emptyMap()
-                },
-                requestBodySample = requestBody,
-                requestBodyFullSize = requestSize,
-                requestBodyContentType = try {
-                    delegate.getRequestProperty("Content-Type")
-                } catch (_: Exception) {
-                    null
-                },
+    /// 只提交已有的观测数据，记录过程不会调用可能发起请求的底层接口。
+    private fun record(error: IOException? = null) {
+        val metadata = synchronized(lifecycleLock) {
+            if (!started || recorded) return
+            recorded = true
+            ResponseMetadata(
+                requestHeaders = requestHeaders.orEmpty(),
                 statusCode = statusCode,
                 responseHeaders = responseHeaders,
-                responseBodySample = responseBody,
-                responseBodyFullSize = responseSize,
-                responseBodyContentType = try {
-                    delegate.contentType
-                } catch (_: Exception) {
-                    null
-                },
-                error = error?.let { it.message ?: it.javaClass.simpleName },
-                durationMs = ((System.nanoTime() - startNs) / 1_000_000).toInt().coerceAtLeast(0),
-                adapter = adapter,
-            ),
-            generation,
-        )
-    }
-
-    /// 响应头字典：HttpURLConnection.getHeaderFields() 的首项是状态行（key 为 null），
-    /// 必须剔除，否则 Web 侧会渲染出一个空名头。
-    private fun buildResponseHeaders(): Map<String, List<String>>? {
-        val fields = delegate.headerFields ?: return null
-        val result = LinkedHashMap<String, List<String>>()
-        for ((name, values) in fields) {
-            if (name == null) continue
-            val cleaned = values?.filterNotNull() ?: emptyList()
-            if (cleaned.isEmpty()) continue
-            result[name] = cleaned
+                error = error ?: inputFailure,
+            )
         }
-        return result
+        val (requestBody, requestSize) = synchronized(requestLock) { requestSample.toByteArray() to requestBytes }
+        val (responseBody, responseSize) = synchronized(responseLock) { responseSample.toByteArray() to responseBytes }
+        runCatching {
+            HttpExchangeRecorder.record(
+                CapturedExchange(
+                    method = delegate.requestMethod,
+                    url = delegate.url?.toString() ?: "",
+                    requestHeaders = metadata.requestHeaders,
+                    requestBodySample = requestBody,
+                    requestBodyFullSize = requestSize,
+                    requestBodyContentType = contentType(metadata.requestHeaders),
+                    statusCode = metadata.statusCode,
+                    responseHeaders = metadata.responseHeaders,
+                    responseBodySample = responseBody,
+                    responseBodyFullSize = responseSize,
+                    responseBodyContentType = contentType(metadata.responseHeaders),
+                    error = metadata.error?.let { it.message ?: it.javaClass.simpleName },
+                    durationMs = ((System.nanoTime() - startNs) / 1_000_000).toInt().coerceAtLeast(0),
+                    adapter = adapter,
+                ),
+                generation,
+            )
+        }
     }
 
-    private fun recordError(e: IOException) {
-        record(e)
-    }
+    private fun contentType(headers: Map<String, List<String>>?): String? =
+        headers?.entries?.firstOrNull { it.key.equals("Content-Type", ignoreCase = true) }?.value?.firstOrNull()
+
+    private data class ResponseMetadata(
+        val requestHeaders: Map<String, List<String>>,
+        val statusCode: Int?,
+        val responseHeaders: Map<String, List<String>>?,
+        val error: IOException?,
+    )
 }

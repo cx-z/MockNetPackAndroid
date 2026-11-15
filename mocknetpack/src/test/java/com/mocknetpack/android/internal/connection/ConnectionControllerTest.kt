@@ -255,7 +255,7 @@ class ConnectionControllerTest {
         assertNotEquals(ConnectionState.TOKEN_INVALID, controller.connectionState)
     }
 
-    // MARK: - AN-9 断连保护（register 失败清空 Mock 快照）
+    // MARK: - 断连保护（register 失败清空 Mock 快照）
 
     /// register 网络失败第 1 次快照仍生效；第 2 次清空（内存+磁盘，单测仅内存）；
     /// 连接恢复后以 sinceVersion=0 重新从服务端下载（旧快照不恢复）。
@@ -315,8 +315,7 @@ class ConnectionControllerTest {
         assertNull("旧规则不恢复", MockRuleController.match("POST", "/old"))
     }
 
-    /// AN-9 断连保护（用户决策 2026-10-23：**连续**失败语义——任意成功握手
-    /// 重置计数）：注册成功后设备离开内网 → heartbeat 连续失败——第 1 次快照
+    /// 注册成功后设备离开内网，heartbeat 连续失败时，第 1 次失败后快照
     /// 仍生效，第 2 次清空（内存+磁盘，单测仅内存）；恢复后 sinceVersion=0 重拉。
     @Test
     fun `heartbeat fails twice clears mock snapshot then reconnect re-downloads`() {
@@ -370,7 +369,7 @@ class ConnectionControllerTest {
         assertNull("旧规则不恢复", MockRuleController.match("GET", "/old"))
     }
 
-    /// AN-9 连续失败语义：心跳失败夹成功（网络抖动）不误清——任意成功握手
+    /// 连续失败语义：心跳失败夹成功（网络抖动）不误清——任意成功握手
     /// 重置计数，单次失败后计数回到 0，永不达阈值。
     @Test
     fun `interleaved heartbeat failures with success reset counter without clearing`() {
@@ -414,7 +413,7 @@ class ConnectionControllerTest {
         assertNotNull("交替失败/成功不应误清快照", MockRuleController.match("GET", "/old"))
     }
 
-    /// AN-9 连续失败语义：第 1 段断连清空 → 恢复（成功重置计数）重拉新规则 →
+    /// 连续失败语义：第 1 段断连清空 → 恢复（成功重置计数）重拉新规则 →
     /// 第 2 段断连再次连续失败 2 次 → 新快照再次被清（每段断连独立保护）。
     @Test
     fun `second disconnect episode clears snapshot again after reconnect`() {

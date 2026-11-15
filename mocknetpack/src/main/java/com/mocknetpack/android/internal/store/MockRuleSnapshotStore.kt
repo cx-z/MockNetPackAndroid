@@ -6,7 +6,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Mock 规则快照持久化（AN-9：启动早的请求也能被 Mock）。
+ * Mock 规则快照持久化，用于冷启动时匹配请求。
  *
  * 与 ServerAddressStore 同模式：SharedPreferences + 懒加载 prefs（构造不碰
  * context，单测无 Android context 时可安全构造；首次 IO 失败由调用方降级）。

@@ -23,7 +23,7 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
-/// HttpURLConnection 包装器（AN-10 M2）回归：200 文本 / POST 请求体 / 302 跟随 /
+/// HttpURLConnection 包装器回归：200 文本 / POST 请求体 / 302 跟随 /
 /// 404 errorStream / gzip / 大响应（1MB 上限）。
 /// 同一 MockWebServer 桩既是业务目标，也是 /traffic 上传端点（与 OkHttp 测试同构）。
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -212,20 +212,20 @@ class UrlConnectionCaptureTest {
         startCapturing()
         val conn = open("/api/v1/missing")
         try {
-            assertEquals(404, conn.responseCode)
             try {
                 conn.inputStream
                 fail("404 的 getInputStream 应当抛 IOException")
             } catch (_: java.io.IOException) {
                 // 预期：4xx 走 errorStream。
             }
-            conn.errorStream?.bufferedReader()?.readText()
+            assertEquals("nope", conn.errorStream!!.bufferedReader().use { it.readText() })
         } finally {
             conn.disconnect()
         }
 
         val entry = uploadedEntry()
         assertEquals(404, entry.optInt("statusCode"))
+        assertEquals("nope", entry.optString("responseBody"))
         assertEquals("httpurlconnection", entry.optString("adapter"))
     }
 
@@ -293,5 +293,14 @@ class UrlConnectionCaptureTest {
         val b64 = entry.optString("responseBodyBase64")
         assertNotNull(b64)
         assertEquals(MockNetPack.BODY_LIMIT_BYTES.toInt(), java.util.Base64.getDecoder().decode(b64).size)
+    }
+    @Test
+    fun `unused connection disconnect does not send or record a request`() {
+        startCapturing()
+        open("/api/v1/unused").disconnect()
+        TrafficCaptureController.flush()
+
+        assertEquals(0, countRequests("/api/v1/unused"))
+        assertEquals(0, countRequests("/traffic"))
     }
 }

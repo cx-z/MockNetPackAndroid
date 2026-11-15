@@ -5,7 +5,7 @@ import com.mocknetpack.android.internal.connection.ConnectionClient
 import com.mocknetpack.android.internal.log.SDKLogger
 
 /**
- * M15 大图字节治理：按 media ref 拉取规则 blob，并做进程内 LRU 缓存。
+ * 大图字节治理：按 media ref 拉取规则 blob，并做进程内 LRU 缓存。
  *
  * 语义（对齐 iOS RuleMediaCache）：
  * - 规则 `MockResponse.media` 存在时，回放前用

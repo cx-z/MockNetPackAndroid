@@ -36,7 +36,7 @@ import org.json.JSONObject
  * - codec 槽：`registerBinaryCodec` 安装 dispatch 闭包（响应解码/编码、
  *   请求体解码/编码），Interceptor 在组装记录时读取。
  * - Android 侧无全局 URLProtocol 注入：拦截器由宿主 `addInterceptor` 显式
- *   加入（D1 差异）；arm() 仅幂等标记（首次接入扫码前创建的 client 也携带拦截器，
+ *   加入；arm() 仅幂等标记（首次接入扫码前创建的 client 也携带拦截器，
  *   未连接时 isCapturing=false 不拦业务）。
  */
 object TrafficCaptureController {
@@ -64,7 +64,6 @@ object TrafficCaptureController {
     // MARK: - 状态（锁保护）
 
     private val lock = Any()
-    @Volatile
     private var running = false
     private var capturingValue = false
     /// 仅本次有服务器的启动握手期间暂存 HTTP；首个会话结果或终止后关闭（对齐 iOS startupBufferingValue）。
@@ -79,14 +78,13 @@ object TrafficCaptureController {
     private var serverURLValue: String? = null
     private var logHandler: ((String) -> Unit)? = null
 
-    /// 运行时自检计数（三级可见性之二）：OkHttp 拦截器每次真正接管自增一次。
-    /// 会话 start 后 5s 仍为 0 → 提示 instrumented 可能为 false（插件未生效 /
-    /// kill switch 关闭 / 确实没有业务请求）。
-    private val interceptedCount = java.util.concurrent.atomic.AtomicLong(0)
+    private val observedOkHttpTraffic = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    /// 拦截器入口调用（内部使用）：标记"有请求经过 SDK"。
+    /// 只记录首次符合采集条件的业务 OkHttp 流量，与织入状态独立。
     internal fun noteIntercepted() {
-        interceptedCount.incrementAndGet()
+        if (observedOkHttpTraffic.compareAndSet(false, true)) {
+            runCatching { SDKLogger.info("eligible OkHttp traffic observed", category = "capture") }
+        }
     }
 
     private var pending = mutableListOf<TrafficEntry>()
@@ -143,7 +141,7 @@ object TrafficCaptureController {
     // MARK: - 生命周期
 
     /// 预注入（连接层 unconfigured 启动时调用；幂等）：仅"武装"采集开关，
-    /// 不发起网络。Android 侧拦截器由宿主提前 addInterceptor 注入（D1），
+    /// 不发起网络。Android 侧拦截器由宿主提前 addInterceptor 注入，
     /// 未连接时 isCapturing=false，业务零干预。
     fun arm() {
         synchronized(lock) {
@@ -178,18 +176,6 @@ object TrafficCaptureController {
                     flush()
                 }
             }
-            // 运行时自检：会话开始后 5s 仍没有任何请求经过 SDK → 提示 instrumented
-            // 可能为 false（插件未织入 / kill switch 关闭 / 5s 内确实没有业务请求）。
-            val baseline = interceptedCount.get()
-            s.launch {
-                delay(5_000)
-                if (running && interceptedCount.get() == baseline) {
-                    log(
-                        "WARN instrumented=false: 5s 内未拦截到任何 OkHttp 请求" +
-                            "（插件未生效/被 -Pmocknetpack.instrument=false 关闭/确实无业务请求）",
-                    )
-                }
-            }
         }
         log("traffic capture started (startup buffering enabled until first session result)")
     }
@@ -207,7 +193,7 @@ object TrafficCaptureController {
             scope?.cancel()
             scope = null
         }
-        // M15：会话结束清空 media 字节缓存（规则快照里只剩 sha256，重新拉取即可）。
+        // 会话结束清空 media 字节缓存（规则快照里只剩 sha256，重新拉取即可）。
         RuleMediaCache.reset()
         log("traffic capture stopped")
     }
@@ -507,7 +493,7 @@ object TrafficCaptureController {
         j.put("durationMs", e.durationMs)
         j.put("mocked", e.mocked)
         e.matchedRuleId?.let { j.put("matchedRuleId", it) }
-        // AN-10 D4a：采集方式（可选；沿用 omitempty 风格，null 不出现在 JSON 里）。
+        // 采集方式（可选；沿用 omitempty 风格，null 不出现在 JSON 里）。
         e.adapter?.let { j.put("adapter", it) }
         return j
     }

@@ -26,7 +26,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * M15（方案 D 阶段二）：大图规则回放——按 media 引用拉 blob、LRU 复用、fail-open。
+ * 验证大图规则回放、按 media 引用拉取字节、LRU 复用及失败放行。
  *
  * 与 iOS `MockRuleMediaReplayTests` 三条用例对齐：
  * ① media 规则回放给定字节；② 取数失败 fail-open 转发真实请求且留 error 命中流量；
@@ -221,6 +221,35 @@ class MockRuleMediaReplayTest {
     }
 
     /** ③ media 缺失时退回 bodyBase64（既有路径回归），且不发 media 请求。 */
+    @Test
+    fun `media failure writes the original request body only on the network path`() {
+        val ref = MediaRef(sha256 = "missing-post", size = blobBytes.size.toLong(), contentType = "image/png")
+        MockRuleController.applyForTesting(listOf(mediaRule(ref = ref).copy(method = "POST")), version = 1)
+        startCapturing()
+        handler = { req ->
+            when {
+                req.path!!.endsWith("/media") -> MockResponse().setResponseCode(404)
+                req.path!!.endsWith("/traffic") -> MockResponse().setResponseCode(202)
+                else -> MockResponse().setResponseCode(200)
+            }
+        }
+
+        var writes = 0
+        val body = object : okhttp3.RequestBody() {
+            override fun contentType() = okhttp3.MediaType.parse("text/plain")
+            override fun contentLength() = 3L
+            override fun writeTo(sink: okio.BufferedSink) {
+                writes++
+                sink.writeUtf8(if (writes == 1) "abc" else "xyz")
+            }
+        }
+        val request = Request.Builder().url(server.url("/api/v1/big.png")).post(body).build()
+        client.newCall(request).execute().use { assertEquals(200, it.code()) }
+
+        assertEquals(1, writes)
+        assertEquals("abc", recordedRequests.single { it.path!!.endsWith("/big.png") }.body.readUtf8())
+    }
+
     @Test
     fun `non media rule falls back to bodyBase64`() {
         MockRuleController.applyForTesting(

@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * AN-10 M3a-2：注册载荷的 capabilities（能力声明）序列化。
+ * 注册载荷的 capabilities（能力声明）序列化。
  *
  * 契约（RegisterDeviceRequest.capabilities）：
  * - adapters / instrumented / requestBodyTee 三个字段；

@@ -55,8 +55,8 @@ dependencies {
     api(libs.okhttp)
     // 连接层/采集层内部调度使用协程（对宿主不可见）。
     implementation(libs.coroutines.android)
-    // AN-4 扫码：CameraX（PreviewView/ImageAnalysis）+ ML Kit barcode（bundled，无需 Play Services）。
-    // 依赖随 AAR 合并进宿主 Debug 包；外网包不引入 SDK ⇒ 天然零携带（§8.3，D6）。
+    // 扫码：CameraX（PreviewView/ImageAnalysis）+ ML Kit barcode（bundled，无需 Play Services）。
+    // 依赖随 AAR 合并进宿主 Debug 包；外网包不引入 SDK ⇒ 天然零携带。
     implementation(libs.camera.core)
     implementation(libs.camera.camera2)
     implementation(libs.camera.lifecycle)
@@ -73,10 +73,8 @@ dependencies {
     testImplementation(libs.orgjson)
 }
 
-// AN-10 P0：宿主 Dokimo 仍用 Kotlin 1.8（只接受 ≤ 1.9.0 的元数据），而本仓库
-// 走 AGP 9 内置 Kotlin（2.2），默认产物元数据为 2.2.0，宿主集成 AAR 时直接报
-// "Module was compiled with an incompatible version of Kotlin"。发布产物必须能被
-// 老宿主读取，故把 Kotlin 元数据版本压到 1.9.0（不影响 JVM target / 运行行为）。
+// Dokimo ships Kotlin 1.8. Keep the SDK's generated calls compatible with that runtime.
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions.apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_8)
     compilerOptions.freeCompilerArgs.add("-Xmetadata-version=1.9.0")
 }

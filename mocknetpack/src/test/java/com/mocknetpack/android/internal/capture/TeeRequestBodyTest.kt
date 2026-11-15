@@ -4,12 +4,13 @@ import okhttp3.MediaType
 import okhttp3.RequestBody
 import okio.Buffer
 import okio.BufferedSink
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/// TeeRequestBody（AN-10 M3a-0）：委托式请求体采集。
+/// TeeRequestBody：委托式请求体采集。
 /// 覆盖 文本 / 一次性 body / 重试（writeTo 多次）/ 二进制大 body / 超限截断。
 class TeeRequestBodyTest {
 
@@ -25,7 +26,7 @@ class TeeRequestBodyTest {
         }
 
     @Test
-    fun `tees text body without changing bytes and declares unknown length`() {
+    fun `tees text body without changing bytes and preserves fixed length`() {
         val payload = """{"page":1,"q":"x"}""".toByteArray()
         val tee = TeeRequestBody(body(payload), limit = 1024)
 
@@ -101,5 +102,16 @@ class TeeRequestBodyTest {
         )
         assertTrue(parts.first.startsWith("[truncated ${payload.size} bytes] "))
         assertFalse(parts.second != null)
+    }
+    @Test
+    fun `captures the exact prefix when an Okio segment leaves a trailing byte`() {
+        val payload = ByteArray(1_048_577) { (it % 127).toByte() }
+        val tee = TeeRequestBody(body(payload), limit = 1_048_576L)
+        val downstream = Buffer()
+        tee.writeTo(downstream)
+
+        assertArrayEquals(payload, downstream.readByteArray())
+        assertArrayEquals(payload.copyOf(1_048_576), tee.recordedBytes())
+        assertEquals(payload.size.toLong(), tee.recordedSize())
     }
 }

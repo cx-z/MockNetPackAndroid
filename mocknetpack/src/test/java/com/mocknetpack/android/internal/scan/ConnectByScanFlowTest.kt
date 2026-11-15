@@ -83,6 +83,7 @@ class ConnectByScanFlowTest {
     private fun runFlow(
         probeRetryCount: Int = 4,
         probeRetryDelayMs: Long = 10,
+        capabilitiesProvider: (() -> com.mocknetpack.android.SdkCapabilities)? = null,
     ) {
         runBlocking {
             ConnectByScanFlow.execute(
@@ -94,6 +95,7 @@ class ConnectByScanFlowTest {
                 sdkVersion = "0.1.0-SNAPSHOT",
                 osVersion = "15",
                 clientFactory = { ConnectionClient.create(it) },
+                capabilitiesProvider = capabilitiesProvider,
                 probeRetryCount = probeRetryCount,
                 probeRetryDelayMs = probeRetryDelayMs,
                 onStop = { stops.add("stop") },
@@ -119,7 +121,9 @@ class ConnectByScanFlowTest {
 
     @Test
     fun `register payload carries contract fields with pairing token`() {
-        runFlow()
+        runFlow(capabilitiesProvider = {
+            com.mocknetpack.android.SdkCapabilities(adapters = listOf("okhttp"), instrumented = true)
+        })
         val register = recordedRequests.first { it.path!!.endsWith("/devices/register") }
         val body = JSONObject(register.body.readUtf8())
         assertEquals(appID, body.optString("app"))
@@ -130,6 +134,8 @@ class ConnectByScanFlowTest {
         assertEquals("0.1.0-SNAPSHOT", body.optString("sdkVersion"))
         assertEquals("15", body.optString("osVersion"))
         assertEquals(token, body.optString("pairingToken"))
+        assertEquals(true, body.getJSONObject("capabilities").getBoolean("instrumented"))
+        assertEquals("okhttp", body.getJSONObject("capabilities").getJSONArray("adapters").getString(0))
     }
 
     @Test

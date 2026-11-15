@@ -37,7 +37,7 @@ gradlePlugin {
 }
 
 // ---------------------------------------------------------------------------
-// AN-10 M3a-2：自包含 jar（archiveClassifier = "all"）。
+// 自包含 jar（archiveClassifier = "all"）。
 //
 // 宿主只引这一个文件即可 apply 插件，不需要额外往 buildscript classpath 加 ASM：
 // 插件类 + ASM（asm / asm-commons）打进同一个 jar。Gradle 的插件 classloader 是
@@ -65,5 +65,5 @@ val selfContainedJar by tasks.registering(Jar::class) {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
-// 本地接入走 mavenLocal（M3a-2 补 JitPack 多模块发布配置，本阶段只配置、不发布到远端）。
+// 本地接入通过 mavenLocal，JitPack 流程由 jitpack.yml 配置。
 // java-gradle-plugin 自动创建 pluginMaven 发布 + plugin marker（com.mocknetpack.android.instrument）。

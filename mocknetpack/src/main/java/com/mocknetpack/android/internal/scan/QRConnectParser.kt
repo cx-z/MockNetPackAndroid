@@ -6,9 +6,9 @@ package com.mocknetpack.android.internal.scan
  * 二维码格式：`mocknetpack://connect?v=1&u=<base64url(server)>&a=<appID>&t=<token>`
  * - `u`：Web 同源服务器地址（`${location.origin}/api/v1`），base64url 编码；
  * - `a`：appID（必须与当前 App 匹配，防错扫）；
- * - `t`：配对令牌（10 分钟有效，D5）。
+ * - `t`：配对令牌（10 分钟有效）。
  *
- * did 不在二维码内（D6 澄清）：did 由设备本地持有（DIDStore / 业务方设备 ID），
+ * did 不在二维码内：did 由设备本地持有（DIDStore / 业务方设备 ID），
  * 二维码只回答「连哪个服务器、以谁的身份注册」。
  */
 data class QRConnectPayload(
@@ -44,7 +44,7 @@ sealed class QRConnectResult {
 
 /**
  * 扫码二维码解析器（从 iOS QRConnectParser 移植；纯 Kotlin、无 android 依赖，
- * 便于本地单测）。已在骨架阶段实现：AN-4 仅剩相机/扫码 UI 与注册流程。
+ * 便于本地单测）。
  */
 object QRConnectParser {
 

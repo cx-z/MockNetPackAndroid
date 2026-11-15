@@ -10,7 +10,7 @@ import okio.Sink
 import okio.Timeout
 
 /**
- * 委托式请求体采集（AN-10 M3a-0）：**不再** `writeTo(Buffer)` 全量读取后
+ * 委托式请求体采集：在实际写出时采样，不会调用 `writeTo(Buffer)` 全量读取并
  * `RequestBody.create(bytes)` 重建，而是把原 body 原样交给 OkHttp，在写出路径上
  * 边写边抄样本（上限 [limit] 字节）。
  *
@@ -53,7 +53,7 @@ internal class TeeRequestBody(
         delegate.writeTo(tee)
         // 把内层缓冲全部推到 tee（进而写到 OkHttp 的 sink），保证 body 字节先于
         // 后续写入（chunk 终止符等）到达，顺序与未包装时一致。
-        tee.flush()
+        tee.emit()
     }
 
     /// 已观测样本（≤ limit）。
@@ -62,15 +62,15 @@ internal class TeeRequestBody(
     /// 已观测总字节数（未截断）。
     internal fun recordedSize(): Long = synchronized(lock) { total }
 
-    /// 抄写：`source` 中待发送的末 `byteCount` 字节同时进样本缓冲。
-    private fun capture(source: Buffer, offset: Long, byteCount: Long) {
+    /// 抄写：`source` 中待发送的前 `byteCount` 字节同时进样本缓冲。
+    private fun capture(source: Buffer, byteCount: Long) {
         synchronized(lock) {
             total += byteCount
             val room = limit - sample.size()
             if (room <= 0 || byteCount <= 0) return
             val copy = minOf(room, byteCount)
             val staging = Buffer()
-            source.copyTo(staging, offset, copy)
+            source.copyTo(staging, 0, copy)
             sample.write(staging.readByteArray())
         }
     }
@@ -81,7 +81,7 @@ internal class TeeRequestBody(
         private val owner: TeeRequestBody,
     ) : Sink {
         override fun write(source: Buffer, byteCount: Long) {
-            owner.capture(source, source.size() - byteCount, byteCount)
+            owner.capture(source, byteCount)
             delegate.write(source, byteCount)
         }
 

@@ -88,7 +88,7 @@ public class OkHttpClientWeaverTest {
         Counter counter = new Counter();
         new ClassReader(instrumented).accept(counter, 0);
         assertEquals("com/mocknetpack/android/MockNetPack", counter.owner);
-        assertEquals("install", counter.name);
+        assertEquals("installFromInstrumentation", counter.name);
         assertEquals("(Lokhttp3/OkHttpClient$Builder;)V", counter.desc);
     }
 
@@ -115,7 +115,7 @@ public class OkHttpClientWeaverTest {
                         int opcode, String o, String n, String d, boolean itf) {
                     if (opcode == Opcodes.INVOKESTATIC
                             && "com/mocknetpack/android/MockNetPack".equals(o)
-                            && "install".equals(n)) {
+                            && "installFromInstrumentation".equals(n)) {
                         owner = o;
                         Counter.this.name = n;
                         desc = d;

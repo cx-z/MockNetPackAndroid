@@ -108,7 +108,7 @@ class MockNetPackInterceptorTest {
         client.newCall(req).execute().use { resp -> return resp.body()?.string() ?: "" }
     }
 
-    // MARK: - AN7 测试辅助（下游拦截器 / 计数 body）
+    // MARK: - 测试辅助（下游拦截器 / 计数 body）
 
     private fun headerInterceptor(name: String, value: String): Interceptor = Interceptor { chain ->
         chain.proceed(chain.request().newBuilder().header(name, value).build())
@@ -199,7 +199,7 @@ class MockNetPackInterceptorTest {
         assertEquals(200, entry.optInt("statusCode"))
         assertEquals("""{"hello":"world"}""", entry.optString("responseBody"))
         assertEquals(false, entry.optBoolean("mocked"))
-        // AN-10 M1：OkHttp 采集条目带 adapter=okhttp（Web 据此区分采集方式）。
+        // OkHttp 采集条目带 adapter=okhttp（Web 据此区分采集方式）。
         assertEquals("okhttp", entry.optString("adapter"))
         assertTrue(entry.optInt("durationMs") >= 0)
         assertTrue(entry.has("requestHeaders"))
@@ -271,7 +271,7 @@ class MockNetPackInterceptorTest {
         assertEquals(1024 * 1024, java.util.Base64.getDecoder().decode(b64).size)
     }
 
-    // MARK: - Mock 命中回放（AN-3）
+    // MARK: - Mock 命中回放
 
     @Test
     fun `mock hit serves synthetic response without network and uploads mocked entry`() {
@@ -470,7 +470,7 @@ class MockNetPackInterceptorTest {
         }
     }
 
-    // MARK: - AN7 记录来源修正（MockWebServer 验证）
+    // MARK: - 记录来源修正（MockWebServer 验证）
 
     /// 下游测试拦截器修改 URL / 请求头 / 请求体 → SDK 记录能反映这些修改。
     @Test
@@ -760,5 +760,33 @@ class MockNetPackInterceptorTest {
         waitUntil { countRequests("/traffic") >= 1 }
         val entry = JSONObject(lastRequest("/traffic")!!.body.readUtf8()).optJSONArray("entries")!!.getJSONObject(0)
         assertTrue(entry.optString("url").endsWith("/api/v1/final"))
+    }
+    @Test
+    fun `marked streamed body preserves OkHttp retry behavior`() {
+        handler = { req ->
+            if (req.path!!.endsWith("/one-shot")) {
+                MockResponse().setResponseCode(503).setHeader("Retry-After", "0")
+            } else {
+                MockResponse().setResponseCode(202)
+            }
+        }
+        TrafficCaptureController.start(server.url("/api/v1").toString(), appID, did)
+        TrafficCaptureController.updateSession(capturing = true, sessionID = "sess-1")
+        var writes = 0
+        val body = object : RequestBody(), okhttp3.internal.http.UnrepeatableRequestBody {
+            override fun contentType() = MediaType.parse("text/plain")
+            override fun contentLength() = 3L
+            override fun writeTo(sink: okio.BufferedSink) {
+                writes++
+                sink.writeUtf8("abc")
+            }
+        }
+        val request = Request.Builder().url(server.url("/one-shot")).post(body).build()
+        try {
+            client.newCall(request).execute().close()
+            org.junit.Assert.fail("expected HttpRetryException")
+        } catch (_: java.net.HttpRetryException) {
+            assertEquals(1, writes)
+        }
     }
 }

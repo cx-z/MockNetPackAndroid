@@ -95,12 +95,12 @@ internal data class CaptureSession(
 /// 心跳请求（契约 HeartbeatRequest；可选上报 sdkVersion）。
 internal data class HeartbeatRequest(val sdkVersion: String)
 
-/// SDK 能力声明（AN-10 M3a-2，契约 RegisterDeviceRequest.capabilities）：
+/// SDK 能力声明（契约 RegisterDeviceRequest.capabilities）：
 /// 让平台知道这台设备"能抓到什么"，设备页据此展示来源与插桩状态。
 data class SdkCapabilities(
     /// 支持的采集来源（okhttp / httpurlconnection / business）。
     val adapters: List<String>,
-    /// 构建期插桩是否生效（OkHttpClient 构造被织入 MockNetPack.install）。
+    /// 注册时是否已观测到该进程的 OkHttp 构造器执行织入入口。
     val instrumented: Boolean,
     /// 请求体是否为委托式 tee（不重建、不改变报文形态）。
     val requestBodyTee: Boolean = true,
@@ -173,7 +173,7 @@ internal data class TrafficEntry(
     val mocked: Boolean = false,
     /// 命中的规则 ID：仅 mocked=true 时非空。
     val matchedRuleId: String? = null,
-    /// 采集方式（契约 v0.13.0 / AN-10 D4a）：`okhttp` / `httpurlconnection` /
+    /// 采集方式：`okhttp` / `httpurlconnection` /
     /// 业务自填（如 `cronet`）。老客户端与老服务端都不带该字段 → null，
     /// Web 显示 "—"，用于区分「哪个接入面抓到的」。
     val adapter: String? = null,
@@ -209,7 +209,7 @@ internal data class MockResponse(
     /** Mock 回包延迟毫秒数。null/0 = 立即回包。 */
     val delayMs: Int? = null,
     /**
-     * 服务端存储的二进制回包（M15 大图字节治理）。存在时忽略 body/bodyBase64，
+     * 服务端存储的二进制回包。存在时忽略 body/bodyBase64，
      * 回放前经 [com.mocknetpack.android.internal.capture.MockMediaLoader] 按 ruleId
      * 拉取原始字节；拉取失败（断网/404/尺寸不符）记一条 `error="media_unavailable"`
      * 的命中流量后 fail-open 转发真实请求，不回落 body（大图规则 body 为空，

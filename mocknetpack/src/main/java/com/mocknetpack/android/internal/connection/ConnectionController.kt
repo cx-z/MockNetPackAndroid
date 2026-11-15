@@ -51,7 +51,7 @@ class ConnectionController internal constructor() {
         internal const val HEARTBEAT_MAX_SECONDS = 300
         /// 退避上限（秒）。
         internal const val BACKOFF_MAX_SECONDS = 30
-        /// AN-9 断连保护：register 网络失败达该次数即清空本地 Mock 快照
+        /// 断连保护：register 网络失败达该次数即清空本地 Mock 快照
         /// （内存+磁盘）；连接恢复后以 sinceVersion=0 重新下载。用户决策：
         /// 失败第 2 次即清空、旧快照不恢复。
         internal const val REGISTER_FAIL_LIMIT = 2
@@ -95,15 +95,15 @@ class ConnectionController internal constructor() {
     private var pairingTokenValue: String? = null
     private var deviceNameValue: String? = null
 
-    /// SDK 能力声明（AN-10 M3a-2）：由 MockNetPack 门面传入，ConnectionController
+    /// SDK 能力声明：由 MockNetPack 门面传入，ConnectionController
     /// 自身不触碰 MockNetPack 单例（否则 JVM 单测会触发 Looper 初始化）。
-    private var capabilitiesValue: com.mocknetpack.android.SdkCapabilities? = null
+    private var capabilitiesProviderValue: (() -> com.mocknetpack.android.SdkCapabilities)? = null
 
     private var serverConfig = ServerConfig(heartbeatIntervalSeconds = 5, heartbeatTimeoutSeconds = 60)
     private var registered = false
     /// 设备未在 Web 注册（register/heartbeat 404）→ 静默停循环，不再重试。
     private var unregistered = false
-    /// AN-9 断连保护：本次启动周期内 register 网络失败计数（start 时重置；
+    /// 断连保护：本次启动周期内 register 网络失败计数（start 时重置；
     /// 达到 REGISTER_FAIL_LIMIT 即清空本地 Mock 快照）。
     private var registerFailCount = 0
     private var currentBackoff = 1.0
@@ -144,7 +144,7 @@ class ConnectionController internal constructor() {
         osVersion: String,
         pairingToken: String? = null,
         deviceName: String? = null,
-        capabilities: com.mocknetpack.android.SdkCapabilities? = null,
+        capabilitiesProvider: (() -> com.mocknetpack.android.SdkCapabilities)? = null,
         logHandler: ((String) -> Unit)? = null,
     ) {
         synchronized(lock) {
@@ -167,7 +167,7 @@ class ConnectionController internal constructor() {
             currentBackoff = backoffBaseSeconds
             pairingTokenValue = pairingToken
             deviceNameValue = deviceName
-            capabilitiesValue = capabilities
+            capabilitiesProviderValue = capabilitiesProvider
             scope = CoroutineScope(SupervisorJob() + schedulerDispatcher)
         }
 
@@ -195,7 +195,7 @@ class ConnectionController internal constructor() {
         appName: String? = null,
         sdkVersion: String,
         osVersion: String,
-        capabilities: com.mocknetpack.android.SdkCapabilities? = null,
+        capabilitiesProvider: (() -> com.mocknetpack.android.SdkCapabilities)? = null,
         logHandler: ((String) -> Unit)? = null,
     ) {
         synchronized(lock) {
@@ -210,7 +210,7 @@ class ConnectionController internal constructor() {
             osVersionValue = osVersion
             didValue = externalDID ?: DIDStore.did(appID ?: "")
             this.logHandler = logHandler
-            capabilitiesValue = capabilities
+            capabilitiesProviderValue = capabilitiesProvider
             pairingTokenValue = null
             deviceNameValue = null
             registered = false
@@ -329,7 +329,7 @@ class ConnectionController internal constructor() {
                 currentBackoff = backoffBaseSeconds
                 registered = true
                 resp.serverConfig?.let { serverConfig = it }
-                // AN-9 连续失败语义（用户决策 2026-10-23）：任意一次成功握手
+                // 任意一次成功握手
                 // （register 成功 / heartbeat 成功）即重置断连保护计数——只有
                 // 「连续」失败 2 次才清空快照，避免网络抖动（失败夹成功）误清；
                 // 多段断连各自独立保护（第 2 段断连同样在第 2 次连续失败时清空）。
@@ -343,7 +343,7 @@ class ConnectionController internal constructor() {
                 sessionID = resp.session?.id,
             )
             setSessionState(if (resp.session != null) SessionState.CAPTURING else SessionState.IDLE)
-            // AN-3: 心跳成功后按服务端 rulesVersion 增量拉取 Mock 规则
+            // 心跳成功后按服务端 rulesVersion 增量拉取 Mock 规则
             // （fail-open A：拉取失败沿用旧快照；首次失败则不 Mock）。
             MockRuleController.syncIfNeeded(
                 client = client,
@@ -362,7 +362,7 @@ class ConnectionController internal constructor() {
                 }
                 setConnectionState(ConnectionState.OFFLINE)
                 // 永久拒绝：丢弃本次启动的暂存，不污染后续手动激活会话（对齐 iOS）；
-                // AN-9：设备未注册 → 本地 Mock 快照无意义，立即清空（内存+磁盘）。
+                // 设备未注册 → 本地 Mock 快照无意义，立即清空（内存+磁盘）。
                 TrafficCaptureController.cancelStartupCapture(captureGeneration)
                 MockRuleController.clearSnapshot()
                 log("heartbeat 404: device not registered; SDK idle (re-register in Web and restart App)")
@@ -370,8 +370,7 @@ class ConnectionController internal constructor() {
                 // 不 scheduleNext。
             } else {
                 // 网络错误 / 5xx / 解码失败 → 指数退避重连。
-                // AN-9 断连保护：heartbeat 网络失败同样计数（方案 §3.5「register/
-                // heartbeat 网络失败计数」），达阈值清空本地 Mock 快照——设备离开
+                // 断连保护：heartbeat 网络失败同样计数，达阈值清空本地 Mock 快照。设备离开
                 // 内网后无法连接服务器时，旧快照不会无限期控制 App 行为。
                 countRegisterFailure()
                 val backoff = advanceBackoff()
@@ -395,7 +394,7 @@ class ConnectionController internal constructor() {
         gen: Int,
         captureGeneration: Long?,
     ) {
-        val meta = synchronized(lock) {
+        val (meta, capabilitiesProvider) = synchronized(lock) {
             RegisterDeviceRequest(
                 app = appID,
                 did = did,
@@ -406,11 +405,11 @@ class ConnectionController internal constructor() {
                 appName = appNameValue,
                 pairingToken = pairingTokenValue,
                 deviceName = deviceNameValue,
-                capabilities = capabilitiesValue,
-            )
+            ) to capabilitiesProviderValue
         }
         try {
-            val resp = parseRegisterResponse(client.post("devices/register", meta.toJson()))
+            val request = meta.copy(capabilities = capabilitiesProvider?.invoke()).toJson()
+            val resp = parseRegisterResponse(client.post("devices/register", request))
             // 代次校验：旧代注册结果直接丢弃。
             if (!isCurrent(gen)) {
                 finishCycle(gen)
@@ -419,7 +418,7 @@ class ConnectionController internal constructor() {
             synchronized(lock) {
                 registered = true
                 serverConfig = resp.serverConfig
-                registerFailCount = 0 // 注册成功：重置 AN-9 断连保护计数
+                registerFailCount = 0 // 注册成功：重置断连保护计数
             }
             log("registered app=$appID did=$did")
             setConnectionState(ConnectionState.CONNECTED)
@@ -440,7 +439,7 @@ class ConnectionController internal constructor() {
                 }
                 setConnectionState(ConnectionState.OFFLINE)
                 // 永久拒绝：丢弃本次启动的暂存，不污染后续手动激活会话（对齐 iOS）；
-                // AN-9：设备未注册 → 本地 Mock 快照无意义，立即清空（内存+磁盘）。
+                // 设备未注册 → 本地 Mock 快照无意义，立即清空（内存+磁盘）。
                 TrafficCaptureController.cancelStartupCapture(captureGeneration)
                 MockRuleController.clearSnapshot()
                 log("register 404: device not registered on server; SDK idle (register the device in Web)")
@@ -458,8 +457,7 @@ class ConnectionController internal constructor() {
                         unregistered = true
                     }
                     setConnectionState(ConnectionState.TOKEN_INVALID)
-                    // 永久拒绝：丢弃本次启动的暂存（对齐 iOS）；AN-9：令牌失效
-                    // → 本地 Mock 快照无意义，立即清空（内存+磁盘）。
+                    // 令牌失效时丢弃本次启动的暂存，并清空内存和磁盘上的 Mock 快照。
                     TrafficCaptureController.cancelStartupCapture(captureGeneration)
                     MockRuleController.clearSnapshot()
                     log("register 403: pairing token invalid or expired; SDK idle (re-scan a fresh QR)")
@@ -495,12 +493,10 @@ class ConnectionController internal constructor() {
 
     // MARK: - 心跳
 
-    /// AN-9 断连保护：register/heartbeat **连续**网络失败计数（用户决策
-    /// 2026-10-23：连续失败 2 次清空，而非启动周期内累计——任意成功握手即
-    /// 重置，见 start()/register 成功/heartbeat 成功三处）。达到
+    /// 断连保护：统计 register/heartbeat 的连续网络失败次数。启动或握手成功时重置计数。达到
     /// REGISTER_FAIL_LIMIT（第 2 次连续失败）即清空本地 Mock 快照（内存+磁盘）
     /// ——此后启动缓冲期不再用旧快照 Mock；连接恢复后以 sinceVersion=0 重新
-    /// 从服务端下载（用户决策：旧快照不恢复）。
+    /// 从服务端重新下载规则。
     /// 仅首次达到阈值时清快照并打日志（后续失败不再重复无操作清空）。
     private fun countRegisterFailure() {
         val reached = synchronized(lock) {
