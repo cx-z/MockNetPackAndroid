@@ -9,6 +9,7 @@ import com.mocknetpack.android.RegisterDeviceResponse
 import com.mocknetpack.android.ServerConfig
 import com.mocknetpack.android.SessionState
 import com.mocknetpack.android.internal.capture.TrafficCaptureController
+import com.mocknetpack.android.internal.h5.H5RuleController
 import com.mocknetpack.android.internal.log.SDKLogger
 import com.mocknetpack.android.internal.mock.MockRuleController
 import com.mocknetpack.android.internal.store.DIDStore
@@ -342,6 +343,11 @@ class ConnectionController internal constructor() {
                 capturing = resp.session != null,
                 sessionID = resp.session?.id,
             )
+            synchronized(lock) {
+                if (isRunningValue && generationValue == gen && connectionStateValue == ConnectionState.CONNECTED) {
+                    H5RuleController.sync(client, appID ?: "", did, resp.rulesVersion ?: 0)
+                }
+            }
             setSessionState(if (resp.session != null) SessionState.CAPTURING else SessionState.IDLE)
             // 心跳成功后按服务端 rulesVersion 增量拉取 Mock 规则
             // （fail-open A：拉取失败沿用旧快照；首次失败则不 Mock）。
@@ -577,6 +583,9 @@ class ConnectionController internal constructor() {
                 false
             } else {
                 connectionStateValue = state
+                if (state != ConnectionState.CONNECTED) {
+                    H5RuleController.clear()
+                }
                 true
             }
         }

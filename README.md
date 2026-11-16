@@ -2,7 +2,7 @@
 
 MockNetPack's Android debug SDK captures HTTP/HTTPS traffic through an OkHttp application interceptor, uploads it in batches, synchronizes device-scoped rules, and returns mock responses locally. No system proxy, VPN, or capture certificate is required.
 
-The project release version is **1.0.1**, as declared in `gradle.properties`, the repository tag, and the runtime `MockNetPack.VERSION` reported during registration.
+The project release version is **1.1.0**, as declared in `gradle.properties`, the repository tag, and the runtime `MockNetPack.VERSION` reported during registration.
 
 ## Platform requirements
 
@@ -14,7 +14,7 @@ The project release version is **1.0.1**, as declared in `gradle.properties`, th
 | Business network integration | OkHttp application interceptor; current dependency is OkHttp 3.12.8 |
 | QR scanning | CameraX + bundled ML Kit barcode, without Google Play Services |
 
-Capture covers: every `OkHttpClient` (when the instrumentation plugin is applied, see below) or only the clients that call `install`/`interceptor()`; `HttpURLConnection` connections explicitly wrapped with `MockNetPack.wrap(conn)`; and traffic reported by the host through `MockNetPack.reportHttp(...)`. WebView/H5, native (NDK) network stacks, and raw sockets are not captured.
+Capture covers instrumented or explicitly installed OkHttp clients, wrapped `HttpURLConnection` connections, configured Debug WebViews, and exchanges reported by the host through `MockNetPack.reportHttp(...)`.
 
 ## Versioned integration
 
@@ -32,7 +32,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    debugImplementation("com.github.cx-z:MockNetPackAndroid:1.0.1")
+    debugImplementation("com.github.cx-z:MockNetPackAndroid:1.1.0")
 }
 ```
 
@@ -88,7 +88,7 @@ The `mocknetpack-instrument` Gradle plugin weaves `MockNetPack.installFromInstru
 
 ```groovy
 // app/build.gradle — in buildscript { dependencies { ... } }
-classpath files('libs/debug/mocknetpack-instrument-1.0.1-all.jar')
+classpath files('libs/debug/mocknetpack-instrument-1.1.0-all.jar')
 // after `apply plugin: 'com.android.application'`
 apply plugin: 'com.mocknetpack.android.instrument'
 ```
@@ -103,6 +103,12 @@ Behavior and safety:
 - **No double reporting.** The plugin recognizes an installed SDK interceptor or decorated SDK interceptor, including when `newBuilder()` copies it.
 - **Runtime evidence.** The SDK logs the first execution of its woven hook and the first eligible business OkHttp request separately. Check target library requests to validate coverage.
 - **Build log.** With `-i`: `[mocknetpack] instrumentation enabled for variant '...'` / `variant '...' skipped: debug-only instrumentation`.
+
+### WebView capture and Mock
+
+In a Debug build, call `MockNetPack.installH5Capture(webView)` on the UI thread before the first load. The Gradle plugin can install the same hook at a configured WebView setup method through `mocknetpack { h5WebViewSetup = 'com.example.BrowserActivity#initWebView' }`.
+
+The hook uses AndroidX WebKit document-start scripts and message listeners. It captures supported main-frame HTTP activity during an active session. Fetch and asynchronous XHR can use origin-scoped H5 Mock rules when the server advertises Android WebView support. Beacon, EventSource, navigation and resource events provide capture diagnostics.
 
 ### HttpURLConnection and self-reported traffic
 
@@ -133,7 +139,6 @@ MockNetPack.reportHttp(
 
 ### 抓不到什么（Known blind spots）
 
-- **WebView / H5** — not instrumented in this batch (no URLProtocol equivalent).
 - **Native (NDK) HTTP stacks** — including ad SDKs that issue requests from native code; only their Java/Kotlin OkHttp layer is visible.
 - **Raw sockets / custom protocols** — unless the host reports them via `reportHttp`.
 - **OkHttp classes outside the transformed variant** — automatic installation applies to constructors that contain the woven call.
@@ -180,7 +185,7 @@ To return to an unconfigured state, call `stop()`, `resetServer()`, then `start(
 
 ## Capture and replay boundaries
 
-- Version 1.0.1 records `networkResponse.request` when available, falling back to `response.request`. This represents the request associated with the final response, rather than a byte-level network trace or a complete redirect history.
+- The SDK records `networkResponse.request` when available and falls back to `response.request`. This provides the request associated with the final response.
 - Response bodies are captured through a tee while business code reads them, with a 1 MiB recording buffer. Recording completes on EOF / close, so callers must consume or close response bodies. Recorded request bodies also have a 1 MiB limit.
 - Uploads are asynchronous batches. Failed batches are dropped without retry. SDK requests are excluded from recursive capture.
 - Binary replay uses original `bodyBase64` bytes, then edited text encoded by a codec, then UTF-8 text. `BinaryCompression.GZIP` compresses before encryption; the host supplies decryption and corresponding decompression.

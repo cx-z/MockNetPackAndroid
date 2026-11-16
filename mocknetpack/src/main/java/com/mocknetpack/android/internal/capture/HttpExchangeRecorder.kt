@@ -74,12 +74,12 @@ internal object HttpExchangeRecorder {
     /** 业务自报（Cronet / 自研栈 / 封装层）来源。 */
     const val ADAPTER_BUSINESS = "business"
 
-    /// 来源标识与正文是否完整独立，WebKit 来源前缀由服务端保留。
+    /// 来源标识与正文是否完整独立，H5 来源前缀由 SDK WebView 入口保留。
     internal fun sourceLabel(value: String?, fallback: String): String {
         val label = value?.trim() ?: return fallback
         if (label.isEmpty() || label.length > 32) return fallback
         val canonical = label.lowercase()
-        if (canonical.startsWith("wkwebview-") || canonical == "urlprotocol" ||
+        if (canonical.startsWith("wkwebview-") || canonical.startsWith("android-webview-") || canonical == "urlprotocol" ||
             canonical == ADAPTER_OKHTTP || canonical == ADAPTER_HTTP_URL_CONNECTION || canonical == ADAPTER_BUSINESS
         ) return fallback
         return label.takeIf { it.toByteArray(Charsets.UTF_8).size <= 32 } ?: fallback

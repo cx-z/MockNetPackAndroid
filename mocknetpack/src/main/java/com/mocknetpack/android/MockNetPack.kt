@@ -4,9 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.webkit.WebView
 import com.mocknetpack.android.internal.capture.MockNetPackInterceptor
 import com.mocknetpack.android.internal.capture.TrafficCaptureController
 import com.mocknetpack.android.internal.connection.ConnectionController
+import com.mocknetpack.android.internal.h5.H5WebViewCapture
 import com.mocknetpack.android.internal.scan.QRScannerActivity
 import com.mocknetpack.android.internal.store.ServerAddressStore
 
@@ -21,10 +23,22 @@ import com.mocknetpack.android.internal.store.ServerAddressStore
  * 需要 Context）；拦截器由宿主显式加入 OkHttpClient（见 `interceptor()`）。
  */
 object MockNetPack {
+    /** Installs Debug H5 capture before the WebView's first load. Call on its UI thread. */
+    @JvmStatic
+    @JvmOverloads
+    fun installH5Capture(webView: WebView, includeNavigationDiagnostics: Boolean = false) {
+        H5WebViewCapture.install(webView, includeNavigationDiagnostics)
+    }
+
+    /** Removes H5 instrumentation for a WebView that will outlive the Debug installation. */
+    @JvmStatic
+    fun uninstallH5Capture(webView: WebView) {
+        H5WebViewCapture.uninstall(webView)
+    }
 
     /// SDK 版本号（发布版本；接入方通过 GitHub/JitPack 按版本号集成）。
     /// 与 `gradle.properties` 的 version 及插件版本保持一致。
-    const val VERSION = "1.0.1"
+    const val VERSION = "1.1.0"
 
     /// SDK 自身请求的跳过标记 header（对齐 iOS X-MockNetPack-Skip）。
     const val SKIP_HEADER = "X-MockNetPack-Skip"

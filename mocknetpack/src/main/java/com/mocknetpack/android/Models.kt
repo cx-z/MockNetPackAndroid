@@ -177,6 +177,11 @@ internal data class TrafficEntry(
     /// 业务自填（如 `cronet`）。老客户端与老服务端都不带该字段 → null，
     /// Web 显示 "—"，用于区分「哪个接入面抓到的」。
     val adapter: String? = null,
+    val terminalStage: String? = null,
+    val errorDomain: String? = null,
+    val errorCode: Int? = null,
+    val clientAbortReason: String? = null,
+    val responseStaticKind: String? = null,
 )
 
 /// 批量上传请求（契约 TrafficUploadRequest；单批 ≤500 条，由 SDK 攒批控制）。

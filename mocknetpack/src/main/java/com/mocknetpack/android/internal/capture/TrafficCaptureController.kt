@@ -68,6 +68,7 @@ object TrafficCaptureController {
     private var capturingValue = false
     /// 仅本次有服务器的启动握手期间暂存 HTTP；首个会话结果或终止后关闭（对齐 iOS startupBufferingValue）。
     private var startupBufferingValue = false
+    private var sessionStartedAt = 0L
     /// HTTP 请求所属采集代次；启动暂存晋升为首个会话时保留，其余会话切换作废（对齐 iOS httpGeneration）。
     private var httpGeneration = 0L
     /// 是否已 arm（连接层 unconfigured 启动时标记；start 幂等不重复启动定时器）。
@@ -228,6 +229,7 @@ object TrafficCaptureController {
             val c = capturingValue != capturing || sessionIDValue != sessionID
             capturingValue = capturing
             sessionIDValue = sessionID
+            if (c) sessionStartedAt = System.currentTimeMillis()
             if (c || wasBuffering) {
                 if (wasBuffering && capturing) {
                     // 首次心跳激活：代次保留（在飞请求仍归首个会话，对齐 iOS）；
@@ -257,6 +259,14 @@ object TrafficCaptureController {
     val isCapturing: Boolean
         get() = synchronized(lock) { running && capturingValue }
 
+    internal data class H5Window(val generation: Long, val startedAt: Long)
+
+    /** H5 only uses a session confirmed by the device heartbeat. */
+    internal val h5Window: H5Window?
+        get() = synchronized(lock) {
+            if (running && capturingValue && sessionIDValue != null) H5Window(httpGeneration, sessionStartedAt) else null
+        }
+
     /// 当前可接管 HTTP 的采集代次：有效会话或启动暂存期返回当前代次，否则 null。
     /// Interceptor 的 canInit 门闩（对齐 iOS httpCaptureGeneration）——启动暂存不改变
     /// 公开 capturing 状态，但允许启动握手窗口内的业务请求被接管、有界暂存。
@@ -282,7 +292,8 @@ object TrafficCaptureController {
     /// 记录一条完整请求/响应（由 MockNetPackInterceptor 调用）。
     /// generation 由 Interceptor 在请求创建时快照；启动暂存复用 200 条/8MB 有界额度
     /// （按全量序列化大小计费，对齐 iOS），超限丢新条目、保留最早请求。
-    internal fun record(entry: TrafficEntry, generation: Long? = null) {
+    internal fun record(entry: TrafficEntry, generation: Long? = null, encodedSize: Int? = null) {
+        var previousBatch: TrafficUploadRequest? = null
         val (tooMany, tooBig) = synchronized(lock) {
             if (!running || !(capturingValue || startupBufferingValue)) return
             if (generation != null && generation != httpGeneration) return
@@ -293,13 +304,20 @@ object TrafficCaptureController {
                 if (pending.size >= MAX_BATCH_COUNT || size > MAX_BATCH_BYTES - pendingBytes) return
                 bytes = size
             } else {
-                bytes = entry.requestBody.toByteArray(Charsets.UTF_8).size +
+                bytes = encodedSize ?: (entry.requestBody.toByteArray(Charsets.UTF_8).size +
                     (entry.responseBody?.toByteArray(Charsets.UTF_8)?.size ?: 0) + 256
+                )
+                // H5 carries bounded base64 samples whose encoded size can be much larger
+                // than the display text. Take the current batch before adding such a sample.
+                if (encodedSize != null && bytes > MAX_BATCH_BYTES - pendingBytes) {
+                    previousBatch = takeBatchLocked()
+                }
             }
             pending.add(entry)
             pendingBytes += bytes
             (pending.size >= MAX_BATCH_COUNT) to (pendingBytes >= MAX_BATCH_BYTES)
         }
+        previousBatch?.let { uploadBatch(it, "traffic") }
         if (tooMany || tooBig) {
             flush()
         }
@@ -307,25 +325,20 @@ object TrafficCaptureController {
 
     /// 立即上传待上传批次（定时/阈值/会话激活时调用；无数据或无会话则 no-op）。
     fun flush() {
-        val batch: List<TrafficEntry>
-        val sessionID: String
-        val appID: String
-        val did: String
-        synchronized(lock) {
-            if (!capturingValue || sessionIDValue == null || serverURLValue == null ||
-                appIDValue == null || didValue == null || pending.isEmpty()
-            ) {
-                return
-            }
-            batch = pending.toList()
-            sessionID = sessionIDValue!!
-            appID = appIDValue!!
-            did = didValue!!
-            pending = mutableListOf()
-            pendingBytes = 0
-        }
+        val batch = synchronized(lock) { takeBatchLocked() } ?: return
+        uploadBatch(batch, "traffic")
+    }
 
-        uploadBatch(TrafficUploadRequest(appID, did, sessionID, batch), "traffic")
+    /** Takes the pending entries together with their existing session identity. */
+    private fun takeBatchLocked(): TrafficUploadRequest? {
+        val sessionID = sessionIDValue ?: return null
+        val appID = appIDValue ?: return null
+        val did = didValue ?: return null
+        if (!capturingValue || serverURLValue == null || pending.isEmpty()) return null
+        val batch = TrafficUploadRequest(appID, did, sessionID, pending.toList())
+        pending = mutableListOf()
+        pendingBytes = 0
+        return batch
     }
 
     /// 锁外上传一个已绑定设备/会话身份的批次（flush 定时/阈值/会话激活与启动暂存
@@ -495,6 +508,14 @@ object TrafficCaptureController {
         e.matchedRuleId?.let { j.put("matchedRuleId", it) }
         // 采集方式（可选；沿用 omitempty 风格，null 不出现在 JSON 里）。
         e.adapter?.let { j.put("adapter", it) }
+        e.terminalStage?.let { j.put("terminalStage", it) }
+        e.errorDomain?.let { j.put("errorDomain", it) }
+        e.errorCode?.let { j.put("errorCode", it) }
+        e.clientAbortReason?.let {
+            j.put("clientAbort", true)
+            j.put("clientAbortReason", it)
+        }
+        e.responseStaticKind?.let { j.put("responseStaticKind", it) }
         return j
     }
 

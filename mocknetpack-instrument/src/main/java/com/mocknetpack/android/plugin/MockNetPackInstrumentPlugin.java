@@ -26,9 +26,9 @@ import org.objectweb.asm.Opcodes;
  * 安全边界：
  * - 默认开，只对 debug 变体生效（release/preview 不织、不携带 SDK）；
  * - 关闭方式：{@code -Pmocknetpack.instrument=false} 或 {@code mocknetpack { enabled false }}；
- * - fail-open：非 Android 工程 / AGP 版本不兼容 / 无变体 API / SDK 不在 classpath
- *   → WARN 跳过，构建继续；插桩异常不阻断构建；
- * - 只改 OkHttpClient 一个构造，{@code new OkHttpClient()} 会委托到该构造，同样被覆盖。
+ * - 无可用的 AGP 变体 API 时记录警告。运行时的 SDK 调用有单独的异常保护；
+ * - {@code new OkHttpClient()} 委托至同一个构造，亦被覆盖；
+ * - 配置 {@code h5WebViewSetup} 时，在指定 WebView 装配方法正常返回前安装 H5 采集。
  */
 public class MockNetPackInstrumentPlugin implements Plugin<Project> {
 
@@ -104,6 +104,7 @@ public class MockNetPackInstrumentPlugin implements Plugin<Project> {
                 MockNetPackClassVisitorFactory.class,
                 InstrumentationScope.ALL,
                 params -> kotlin.Unit.INSTANCE);
+        configureH5(variant, extension.getH5WebViewSetup().getOrNull(), logger);
         variant.setAsmFramesComputationMode(
                 FramesComputationMode.COMPUTE_FRAMES_FOR_INSTRUMENTED_METHODS);
         logger.lifecycle(
@@ -113,9 +114,30 @@ public class MockNetPackInstrumentPlugin implements Plugin<Project> {
                 (System.nanoTime() - startNs) / 1_000_000L);
     }
 
+    /** H5 只处理宿主显式指定的装配方法。 */
+    private static void configureH5(Variant variant, String setup, Logger logger) {
+        if (setup == null) {
+            return;
+        }
+        String[] target = setup.split("#", -1);
+        if (target.length != 2 || target[0].isBlank() || target[1].isBlank()) {
+            logger.warn("[mocknetpack] h5WebViewSetup must be a qualified class name#method name");
+            return;
+        }
+        variant.transformClassesWith(
+                H5WebViewClassVisitorFactory.class,
+                InstrumentationScope.PROJECT,
+                params -> {
+                    params.getSetupClass().set(target[0]);
+                    params.getSetupMethod().set(target[1]);
+                    return kotlin.Unit.INSTANCE;
+                });
+        logger.lifecycle("[mocknetpack] H5 target configured for variant '{}' at {}",
+                variant.getName(), setup);
+    }
+
     /**
-     * 类访问器工厂：只处理 {@code okhttp3.OkHttpClient}，且要求 SDK 类在 classpath 上
-     * （类缺失 → fail-open 跳过，不织出 NoClassDefFoundError）。
+     * 类访问器工厂只处理 {@code okhttp3.OkHttpClient}。运行时保护织入的 SDK 调用。
      */
     public abstract static class MockNetPackClassVisitorFactory
             implements AsmClassVisitorFactory<InstrumentationParameters.None> {
